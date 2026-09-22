@@ -20,6 +20,7 @@ Rodar localmente:
 """
 import sys
 import os
+import traceback
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -42,7 +43,7 @@ EVENT_STATUS_LABEL = {-1: "", 0: "sem resposta", 1: "reagendado", 2: "efetivado"
 # ============================================================================
 def _init_state():
     for k, v in dict(loaded=False, acc=None, series=None, events=None, ref_date=None, today=None,
-                      analista="", err=None, missing=None).items():
+                      analista="", err=None, err_trace=None, missing=None).items():
         st.session_state.setdefault(k, v)
 
 
@@ -61,10 +62,12 @@ def _load(base_url, analista, token):
         acc, series, events, ref_date, today, missing = build_portfolio(contas, contato, enduser, evento, consumo)
         prog.empty()
         st.session_state.update(loaded=True, acc=acc, series=series, events=events,
-                                 ref_date=ref_date, today=today, analista=analista, err=None, missing=missing)
+                                 ref_date=ref_date, today=today, analista=analista, err=None,
+                                 err_trace=None, missing=missing)
     except ArcGISError as e:
         prog.empty()
         st.session_state.err = f"Erro do ArcGIS: {e}"
+        st.session_state.err_trace = None
         st.session_state.loaded = False
     except Exception as e:  # noqa: BLE001
         prog.empty()
@@ -73,6 +76,7 @@ def _load(base_url, analista, token):
         if any(k in msg.lower() for k in ("token", "999", "498", "499", "403")):
             hint = " Parece exigir login — preencha a API key (ou usuário/senha) na barra lateral."
         st.session_state.err = f"Falha ao carregar: {msg}.{hint}"
+        st.session_state.err_trace = traceback.format_exc()
         st.session_state.loaded = False
 
 
@@ -117,6 +121,9 @@ def sidebar():
 
     if st.session_state.get("err"):
         st.sidebar.error(st.session_state.err)
+        if st.session_state.get("err_trace"):
+            with st.sidebar.expander("Detalhe técnico (pra depuração)"):
+                st.code(st.session_state.err_trace)
     if st.session_state.get("loaded"):
         st.sidebar.success(f"{len(st.session_state.acc)} contas carregadas de {st.session_state.analista}")
         if st.session_state.get("missing"):
