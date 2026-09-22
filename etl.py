@@ -22,6 +22,43 @@ TIER_LABEL = {
 TIER_COLOR = {1: "#d03b3b", 2: "#ec835a", 3: "#e0a100", 4: "#2a78d6", 5: "#2f9a3b", 6: "#8b93a1", 7: "#c3c9d2"}
 EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf7a", "Contato/tentativa": "#eb6834"}
 
+# Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
+# entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
+# quebrar com KeyError, o app preenche o que faltar como vazio e avisa na tela
+# quais campos não foram encontrados, pra você conferir o nome exato no serviço.
+CONTAS_COLS = ["IDCONTA", "NOME_CONTA", "VERTICAL", "SUBSETOR", "PARCEIRO", "EXECUTIVO_RECORRENCIA",
+               "EXECUTIVO_NEGOCIOS", "ENGAJAMENTO", "MATURIDADE", "RISCO", "STATUS", "ESTRATEGIA_CS",
+               "ESTRATEGIA_ATENDIMENTO", "MODALIDADE_ATENDIMENTO", "ENTERPRISE", "AGOL", "ANALISTA_CS"]
+CONTATO_COLS = ["IDCONTA"]
+ENDUSER_COLS = ["IDCONTA", "ENDUSER", "DEPARTAMENTO"]
+EVENTO_COLS = ["IDCONTA", "RESUMO", "FORMATO", "TIPO", "STATUS", "DATA"]
+CONSUMO_COLS = ["IDCONTA", "ENDUSER", "DATA", "CREDITOS", "TOTAL_CREDITOS", "TOTAL_USER", "TOTAL_ATIVADO",
+                "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"]
+
+
+def _missing_fields(df: pd.DataFrame, expected: list[str]) -> list[str]:
+    return [c for c in expected if c not in df.columns]
+
+
+def _ensure_columns(df: pd.DataFrame, expected: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for c in expected:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df
+
+
+def missing_fields_report(contas, contato, enduser, evento, consumo) -> dict[str, list[str]]:
+    """Campos esperados que não vieram do serviço, por camada (antes do padding)."""
+    report = {
+        "CONTAS_0": _missing_fields(contas, CONTAS_COLS),
+        "CONTATO_1": _missing_fields(contato, CONTATO_COLS),
+        "ENDUSER_2": _missing_fields(enduser, ENDUSER_COLS),
+        "EVENTO_3": _missing_fields(evento, EVENTO_COLS),
+        "CONSUMO_AGOL_6": _missing_fields(consumo, CONSUMO_COLS),
+    }
+    return {k: v for k, v in report.items() if v}
+
 
 # ============================================================================
 # 1) Conexão — REST puro (requests), sem a ArcGIS Maps SDK for JavaScript
@@ -210,19 +247,27 @@ def _event_stats(ev: pd.DataFrame, today: pd.Timestamp) -> dict:
     return out
 
 
+F_COLS = ["IDCONTA", "co_stale_days", "tot_cred", "perc", "n_org", "ini", "fim", "elapsed",
+          "days_to_end", "users", "act", "login", "login_days", "first_snap", "n_snap",
+          "vel60", "vel_prev", "act_d90", "act_d180"]
+
+
 def _consumo_stats(consumo: pd.DataFrame, today: pd.Timestamp):
     """Réplica de feat.py: dedup por (conta,org,dia); agrega orgs por dia;
-    calcula consumo entre snapshots do mesmo contrato; retorna (F, series_map, ref_date)."""
+    calcula consumo entre snapshots do mesmo contrato; retorna (F, series_map, ref_date).
+    F sempre tem todas as colunas de F_COLS (mesmo vazia), pra merge() e o resto do
+    pipeline nunca quebrarem por coluna ausente quando não há dado de consumo."""
     co = consumo.copy()
+    empty_F = _ensure_columns(pd.DataFrame(columns=["IDCONTA"]), F_COLS)
     if co.empty:
-        return pd.DataFrame(), {}, None
+        return empty_F, {}, None
 
     for col in ("DATA", "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"):
         if col in co.columns:
             co[col] = esri_dt(co[col])
     co = co.dropna(subset=["DATA"]).copy()
     if co.empty:
-        return pd.DataFrame(), {}, None
+        return empty_F, {}, None
 
     co["D"] = co["DATA"].dt.normalize()
     co = co.sort_values(["IDCONTA", "ENDUSER", "D"]).drop_duplicates(["IDCONTA", "ENDUSER", "D"], keep="last")
@@ -345,10 +390,19 @@ def motivo_of(r: pd.Series):
 
 def build_portfolio(contas: pd.DataFrame, contato: pd.DataFrame, enduser: pd.DataFrame,
                      evento: pd.DataFrame, consumo: pd.DataFrame):
-    """Retorna (acc_df, series_map, events_map, ref_date, today) prontos pro painel."""
+    """Retorna (acc_df, series_map, events_map, ref_date, today, missing_report) prontos pro painel.
+    missing_report lista, por camada, os campos esperados que não vieram do serviço
+    (o app não quebra por isso — só preenche como vazio — mas vale conferir os nomes)."""
     today = pd.Timestamp.now().normalize()
+    missing = missing_fields_report(contas, contato, enduser, evento, consumo)
+    contas = _ensure_columns(contas, CONTAS_COLS)
+    contato = _ensure_columns(contato, CONTATO_COLS)
+    enduser = _ensure_columns(enduser, ENDUSER_COLS)
+    evento = _ensure_columns(evento, EVENTO_COLS)
+    consumo = _ensure_columns(consumo, CONSUMO_COLS)
+
     if contas.empty:
-        return contas, {}, {}, None, today
+        return contas, {}, {}, None, today, missing
 
     n_contatos = contato.groupby("IDCONTA").size().rename("n_contatos") if len(contato) else pd.Series(dtype="int64", name="n_contatos")
 
@@ -375,4 +429,4 @@ def build_portfolio(contas: pd.DataFrame, contato: pd.DataFrame, enduser: pd.Dat
     events_map = {idc: v["evl"] for idc, v in ev_stats.items()}
     monthly_map = {idc: v["monthly"] for idc, v in ev_stats.items()}
 
-    return a, series_map, {"evl": events_map, "monthly": monthly_map}, ref_date, today
+    return a, series_map, {"evl": events_map, "monthly": monthly_map}, ref_date, today, missing
