@@ -27,7 +27,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(__file__))
 from etl import (
-    ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR,
+    ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR,
     build_portfolio, generate_token, load_portfolio_raw,
 )
 
@@ -411,6 +411,92 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict, key_prefix: st
 
 
 # ============================================================================
+# classificação de risco — pontuação ponderada (mesma régua do Arcade)
+# ============================================================================
+def risco_kpis(F: pd.DataFrame):
+    r = F[F["peso_risco"].notna()]
+    excluidas = len(F) - len(r)
+    cols = st.columns(4)
+    for col, label in zip(cols, RISCO_ORDER):
+        col.metric(label, int((r["peso_risco"] == label).sum()))
+    if excluidas:
+        st.caption(f"{excluidas} conta(s) fora da régua (AGOL não licenciado — mesmo critério do Arcade).")
+
+
+def chart_risco_dist(F: pd.DataFrame, key_prefix: str = "risco_dist"):
+    r = F[F["peso_risco"].notna()]
+    if r.empty:
+        st.info("Nenhuma conta classificada na seleção.")
+        return
+    counts = r["peso_risco"].value_counts().reindex(RISCO_ORDER, fill_value=0)
+    fig = go.Figure(go.Bar(
+        x=counts.values, y=counts.index, orientation="h",
+        marker_color=[RISCO_COLOR[k] for k in counts.index],
+        text=counts.values, textposition="outside", hovertemplate="%{y}: %{x} contas<extra></extra>",
+    ))
+    fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"),
+                       xaxis_title=None, showlegend=False, plot_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
+
+
+def risco_table(F: pd.DataFrame, key_prefix: str = "risco_table"):
+    r = F[F["peso_risco"].notna()].copy()
+    if r.empty:
+        st.info("Nenhuma conta classificada na seleção.")
+        return
+    cols = ["NOME_CONTA", "nm_modalidade", "peso_risco", "peso_total", "peso_contato", "peso_p_cons",
+            "peso_p_ativ", "peso_maturidade", "peso_login", "peso_qtde_apps", "penalidade_status"]
+    labels = ["Conta", "Modalidade", "Classificação", "Pontuação", "Contato", "% créditos", "% ativação",
+              "Maturidade", "Login", "Qtde apps", "Penalidade status"]
+    tbl = r[cols].rename(columns=dict(zip(cols, labels))).sort_values("Pontuação")
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
+
+
+def risco_breakdown(F: pd.DataFrame, key_prefix: str = "risco_breakdown"):
+    """Explica a pontuação de uma conta, componente a componente — pra responder
+    'por que essa conta está nessa classificação' na hora."""
+    r = F[F["peso_risco"].notna()].sort_values("peso_total")
+    if r.empty:
+        return
+    names = r["NOME_CONTA"].tolist()
+    sel = st.selectbox("Ver o cálculo de uma conta", names, key=f"select_{key_prefix}")
+    a = r[r["NOME_CONTA"] == sel].iloc[0]
+    cor = RISCO_COLOR.get(a["peso_risco"], "#8b93a1")
+    st.markdown(f"**{a['NOME_CONTA']}** · {a.get('nm_modalidade','—')}")
+    st.markdown(f":{'red' if a['peso_risco'] in ('Crítico','Alto') else 'orange' if a['peso_risco']=='Médio' else 'green'}[**{a['peso_risco']}** — pontuação {a['peso_total']:.0f}]")
+    partes = [
+        ("Contato com o cliente", a["peso_contato"]),
+        ("% de créditos consumidos", a["peso_p_cons"]),
+        ("% de usuários ativados", a["peso_p_ativ"]),
+        ("Maturidade", a["peso_maturidade"]),
+        ("Login recente", a["peso_login"]),
+        ("Quantidade de apps em uso", a["peso_qtde_apps"]),
+    ]
+    for label, val in partes:
+        st.caption(f"+ {label}: **{val:.0f}**")
+    if a["penalidade_status"]:
+        st.caption(f"− Penalidade por status da conta: **{a['penalidade_status']:.0f}**")
+
+
+def risco_view(F: pd.DataFrame):
+    st.caption("Réplica exata da regra que já roda no ArcGIS (Arcade) — mesmos pesos e limiares. "
+               "Quanto maior a pontuação, mais saudável a conta.")
+    risco_kpis(F)
+    st.markdown("---")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.markdown("##### Contas por classificação")
+        chart_risco_dist(F)
+    with c2:
+        st.markdown("##### O cálculo, conta a conta")
+        risco_breakdown(F)
+
+    st.markdown("##### Todas as contas, priorizadas pela pontuação (pior primeiro)")
+    risco_table(F)
+
+
+# ============================================================================
 # visão executiva — uma tela, foco em risco (pra apresentação)
 # ============================================================================
 RISK_TIERS = [1, 2, 3, 6]  # foco imediato, foco da semana, monitoramento, saúde desconhecida
@@ -542,8 +628,11 @@ def main():
     st.caption("Dados ao vivo do Feature Service, filtrados pelo analista CS. Prioridade e motivo são calculados por regras automáticas — não são as análises manuais do relatório.")
 
     view_mode = st.sidebar.radio(
-        "Visão", ["Executiva (apresentação)", "Analista (completa)"], index=0,
-        help="Executiva: uma tela, focada em risco — pra apresentar. Analista: o painel completo do dia a dia.",
+        "Visão",
+        ["Classificação de risco (fórmula)", "Executiva (apresentação)", "Analista (completa)"],
+        index=0,
+        help="Classificação de risco: a régua ponderada (mesma do Arcade), auditável conta a conta. "
+             "Executiva: uma tela, focada em risco — pra apresentar. Analista: o painel completo do dia a dia.",
     )
     st.sidebar.markdown("---")
     sidebar()
@@ -572,7 +661,9 @@ def main():
     F = filters_ui(acc)
     st.markdown("---")
 
-    if view_mode.startswith("Executiva"):
+    if view_mode.startswith("Classificação"):
+        risco_view(F)
+    elif view_mode.startswith("Executiva"):
         executive_view(F, acc, series, events, today)
     else:
         analyst_view(F, acc, series, events, today)
