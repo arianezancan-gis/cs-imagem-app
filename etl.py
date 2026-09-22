@@ -31,6 +31,12 @@ RISCO_COLOR = {"Crítico": "#d03b3b", "Alto": "#ec835a", "Médio": "#e0a100", "B
 MODALIDADE_LABEL = {1: "Tech Touch", 2: "Low Touch", 3: "Mid Touch", 4: "High Touch", 5: "New Logo"}
 ESTRATEGIA_CS_LABEL = {1: "Agenda", 2: "Email", 3: "Sem Atuação", 4: "Definir"}
 AGOL_LABEL = {1: "Sim", 2: "Não"}
+STATUS_LABEL = {
+    1: "Em Atendimento", 2: "Recorrência", 3: "Sem Retorno", 4: "Pausado pelo Cliente",
+    5: "Não Iniciado", 6: "Sem Atuação", 7: "Em Onboarding", 8: "Pausado pelo Comercial",
+    9: "Não Iniciado - Time de contas", 10: "Churn", 11: "Randover para outro analista",
+    12: "Parceiro Executando Serviço",
+}
 
 # Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
 # entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
