@@ -142,7 +142,7 @@ def filters_ui(acc: pd.DataFrame):
         tiers_sel = st.multiselect(
             "Prioridade", options=list(TIER_LABEL.keys()),
             format_func=lambda t: TIER_LABEL[t],
-            default=[t for t in TIER_LABEL if t != 7],
+            default=list(TIER_LABEL.keys()),
         )
     with c2:
         vert_sel = st.selectbox("Vertical", ["Todas"] + sorted(acc["VERTICAL"].dropna().unique().tolist()))
