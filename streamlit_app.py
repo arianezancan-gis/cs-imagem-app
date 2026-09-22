@@ -452,30 +452,30 @@ def risco_table(F: pd.DataFrame, key_prefix: str = "risco_table"):
     st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
 
 
-def risco_breakdown(F: pd.DataFrame, key_prefix: str = "risco_breakdown"):
-    """Explica a pontuação de uma conta, componente a componente — pra responder
-    'por que essa conta está nessa classificação' na hora."""
-    r = F[F["peso_risco"].notna()].sort_values("peso_total")
-    if r.empty:
-        return
-    names = r["NOME_CONTA"].tolist()
-    sel = st.selectbox("Ver o cálculo de uma conta", names, key=f"select_{key_prefix}")
-    a = r[r["NOME_CONTA"] == sel].iloc[0]
-    cor = RISCO_COLOR.get(a["peso_risco"], "#8b93a1")
-    st.markdown(f"**{a['NOME_CONTA']}** · {a.get('nm_modalidade','—')}")
-    st.markdown(f":{'red' if a['peso_risco'] in ('Crítico','Alto') else 'orange' if a['peso_risco']=='Médio' else 'green'}[**{a['peso_risco']}** — pontuação {a['peso_total']:.0f}]")
-    partes = [
-        ("Contato com o cliente", a["peso_contato"]),
-        ("% de créditos consumidos", a["peso_p_cons"]),
-        ("% de usuários ativados", a["peso_p_ativ"]),
-        ("Maturidade", a["peso_maturidade"]),
-        ("Login recente", a["peso_login"]),
-        ("Quantidade de apps em uso", a["peso_qtde_apps"]),
+def risco_metodologia():
+    """Resumo fixo de como a pontuação é calculada — não muda conforme a conta
+    selecionada, é a régua em si (pra explicar de uma vez, não caso a caso)."""
+    st.markdown("A pontuação de cada conta soma 6 componentes — os limiares de cada um mudam "
+                 "conforme a modalidade de atendimento (Tech/Low/Mid/High Touch, New Logo) — e desconta "
+                 "uma penalidade por status da conta:")
+    componentes = [
+        "Contato com o cliente — interações individuais e em massa nos últimos 100 dias",
+        "% de créditos consumidos — ritmo de consumo do pacote frente ao tempo de contrato",
+        "% de usuários ativados — proporção dos usuários cadastrados que já ativaram",
+        "Maturidade — nível de maturidade registrado no cadastro da conta",
+        "Login recente — dias desde o último acesso",
+        "Quantidade de apps em uso",
     ]
-    for label, val in partes:
-        st.caption(f"+ {label}: **{val:.0f}**")
-    if a["penalidade_status"]:
-        st.caption(f"− Penalidade por status da conta: **{a['penalidade_status']:.0f}**")
+    for c in componentes:
+        st.caption(f"+ {c}")
+    st.caption("− Penalidade por status da conta (varia por status e modalidade)")
+
+    st.markdown("**A soma final define a classificação:**")
+    faixas = [("Crítico", "até 20 pontos"), ("Alto", "21 a 40 pontos"),
+              ("Médio", "41 a 60 pontos"), ("Baixo", "acima de 60 pontos")]
+    for label, faixa in faixas:
+        cor = "red" if label in ("Crítico", "Alto") else "orange" if label == "Médio" else "green"
+        st.markdown(f":{cor}[**{label}**] — {faixa}")
 
 
 def risco_view(F: pd.DataFrame):
@@ -494,8 +494,8 @@ def risco_view(F: pd.DataFrame):
         st.markdown("##### Contas por classificação")
         chart_risco_dist(F)
     with c2:
-        st.markdown("##### O cálculo, conta a conta")
-        risco_breakdown(F)
+        st.markdown("##### Como a pontuação é calculada")
+        risco_metodologia()
 
     st.markdown("##### Todas as contas, priorizadas pela pontuação (pior primeiro)")
     risco_table(F)
