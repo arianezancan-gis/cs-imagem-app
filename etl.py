@@ -27,7 +27,7 @@ EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf
 # quebrar com KeyError, o app preenche o que faltar como vazio e avisa na tela
 # quais campos não foram encontrados, pra você conferir o nome exato no serviço.
 CONTAS_COLS = ["IDCONTA", "NOME_CONTA", "VERTICAL", "SUBSETOR", "PARCEIRO", "EXECUTIVO_RECORRENCIA",
-               "EXECUTIVO_NEGOCIOS", "ENGAJAMENTO", "MATURIDADE", "RISCO", "STATUS", "ESTRATEGIA_CS",
+               "EXECUTIVO_NEGOCIOS", "ENGAJAMENTO", "MATURIDADE", "STATUS", "ESTRATEGIA_CS",
                "ESTRATEGIA_ATENDIMENTO", "MODALIDADE_ATENDIMENTO", "ENTERPRISE", "AGOL", "ANALISTA_CS"]
 CONTATO_COLS = ["IDCONTA"]
 ENDUSER_COLS = ["IDCONTA", "ENDUSER", "DEPARTAMENTO"]
