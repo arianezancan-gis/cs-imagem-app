@@ -300,7 +300,6 @@ def quality_panel(F: pd.DataFrame):
     sc = F[F["t"] != 7]
     n = max(len(sc), 1)
     rows = [
-        ("Sem risco cadastrado", (sc["RISCO"].isna()).sum() / n),
         ("Engajamento e maturidade = 4 (parece \"não avaliado\")", ((sc["ENGAJAMENTO"] == 4) & (sc["MATURIDADE"] == 4)).sum() / n),
         ("Sem dado de uso (Enterprise sem AGOL, ou fora da base de consumo)", (~sc["hasUse"]).sum() / n),
         ("Com 0 ou 1 contato cadastrado", (sc["n_contatos"] <= 1).sum() / n),
