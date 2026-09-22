@@ -29,6 +29,7 @@ EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf
 RISCO_ORDER = ["Crítico", "Alto", "Médio", "Baixo"]
 RISCO_COLOR = {"Crítico": "#d03b3b", "Alto": "#ec835a", "Médio": "#e0a100", "Baixo": "#2f9a3b"}
 MODALIDADE_LABEL = {1: "Tech Touch", 2: "Low Touch", 3: "Mid Touch", 4: "High Touch", 5: "New Logo"}
+ESTRATEGIA_CS_LABEL = {1: "Agenda", 2: "Email", 3: "Sem Atuação", 4: "Definir"}
 
 # Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
 # entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
