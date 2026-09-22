@@ -109,9 +109,16 @@ def _query(base_url: str, layer_id: int, where: str, token: str | None, out_fiel
             raise ArcGISError(msg)
         feats = data.get("features", [])
         rows.extend(f["attributes"] for f in feats)
-        if len(feats) < page:
+        # alguns serviços limitam o retorno ao próprio maxRecordCount (ex.: 100 ou 200),
+        # mesmo pedindo mais — nesse caso a página vem menor que o pedido só por isso,
+        # não porque acabaram os registros. exceededTransferLimit avisa quando é o caso;
+        # avançar pelo nº real recebido (em vez do tamanho pedido) evita pular registros.
+        if not feats:
             break
-        offset += page
+        exceeded = bool(data.get("exceededTransferLimit"))
+        if not exceeded and len(feats) < page:
+            break
+        offset += len(feats)
         if offset > 60000:  # trava de segurança
             break
     return pd.DataFrame(rows)
