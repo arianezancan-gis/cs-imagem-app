@@ -415,12 +415,9 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict, key_prefix: st
 # ============================================================================
 def risco_kpis(F: pd.DataFrame):
     r = F[F["peso_risco"].notna()]
-    excluidas = len(F) - len(r)
     cols = st.columns(4)
     for col, label in zip(cols, RISCO_ORDER):
         col.metric(label, int((r["peso_risco"] == label).sum()))
-    if excluidas:
-        st.caption(f"{excluidas} conta(s) fora da régua (AGOL não licenciado — mesmo critério do Arcade).")
 
 
 def chart_risco_dist(F: pd.DataFrame, key_prefix: str = "risco_dist"):
@@ -439,15 +436,21 @@ def chart_risco_dist(F: pd.DataFrame, key_prefix: str = "risco_dist"):
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
+def risco_filter_ui(acc: pd.DataFrame):
+    st.markdown("#### Filtro")
+    return st.multiselect(
+        "Classificação de risco", options=RISCO_ORDER, default=RISCO_ORDER,
+        key="risco_filtro_classificacao",
+    )
+
+
 def risco_table(F: pd.DataFrame, key_prefix: str = "risco_table"):
     r = F[F["peso_risco"].notna()].copy()
     if r.empty:
         st.info("Nenhuma conta classificada na seleção.")
         return
-    cols = ["NOME_CONTA", "nm_modalidade", "peso_risco", "peso_total", "peso_contato", "peso_p_cons",
-            "peso_p_ativ", "peso_maturidade", "peso_login", "peso_qtde_apps", "penalidade_status"]
-    labels = ["Conta", "Modalidade", "Classificação", "Pontuação", "Contato", "% créditos", "% ativação",
-              "Maturidade", "Login", "Qtde apps", "Penalidade status"]
+    cols = ["NOME_CONTA", "nm_modalidade", "peso_risco", "peso_total"]
+    labels = ["Conta", "Modalidade", "Classificação", "Pontuação"]
     tbl = r[cols].rename(columns=dict(zip(cols, labels))).sort_values("Pontuação")
     st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
 
@@ -481,19 +484,28 @@ def risco_breakdown(F: pd.DataFrame, key_prefix: str = "risco_breakdown"):
 def risco_view(F: pd.DataFrame):
     st.caption("Réplica exata da regra que já roda no ArcGIS (Arcade) — mesmos pesos e limiares. "
                "Quanto maior a pontuação, mais saudável a conta.")
-    risco_kpis(F)
+
+    classes = risco_filter_ui(F)
+    excluidas = int(F["peso_risco"].isna().sum())
+    if excluidas:
+        st.caption(f"{excluidas} conta(s) fora da régua (AGOL não licenciado — mesmo critério do Arcade).")
+    st.markdown("---")
+
+    Fr = F[F["peso_risco"].isin(classes)] if classes else F.iloc[0:0]
+
+    risco_kpis(Fr)
     st.markdown("---")
 
     c1, c2 = st.columns([1, 2])
     with c1:
         st.markdown("##### Contas por classificação")
-        chart_risco_dist(F)
+        chart_risco_dist(Fr)
     with c2:
         st.markdown("##### O cálculo, conta a conta")
-        risco_breakdown(F)
+        risco_breakdown(Fr)
 
     st.markdown("##### Todas as contas, priorizadas pela pontuação (pior primeiro)")
-    risco_table(F)
+    risco_table(Fr)
 
 
 # ============================================================================
