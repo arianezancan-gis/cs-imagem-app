@@ -595,12 +595,13 @@ def tier_of(r: pd.Series) -> int:
             and pd.notna(lg) and lg <= 30):
         return 4
     bad = (pd.notna(lg) and lg > 30) \
-        or (pd.notna(perc) and perc <= 2 and pd.notna(el) and el >= 50 and (r.get("tot_cred") or 0) >= 1000) \
+        or (pd.notna(perc) and perc <= 2 and pd.notna(el) and el >= 50) \
         or (pd.notna(dte) and dte <= 60)
     if bad:
         return 3
-    if (r.get("eff_90") or 0) == 0 and r.get("ESTRATEGIA_CS") == 1 and (r.get("n_snap") or 0) < 8:
-        return 6
+    dse = r.get("days_since_eff")
+    if dse is None or pd.isna(dse) or dse > 30:
+        return 2
     return 5
 
 
@@ -612,9 +613,6 @@ def motivo_of(r: pd.Series):
                     "Tentar contato com o ponto de contato; obter dados de uso do Enterprise")
         return (f"Adoção invisível (sem AGOL); relacionamento com {int(r.get('eff_90') or 0)} contato(s) efetivo(s) em 90 dias",
                 "Levantar uso do Enterprise com o cliente na próxima recorrência")
-    if t == 6:
-        return ("Sem contato efetivo em 90 dias, estratégia de CS de baixo toque e poucos snapshots de consumo: não há evidência suficiente para afirmar saúde",
-                "Tentar um contato ativo com o cliente")
     if t == 4:
         perc = r.get("perc"); el = r.get("elapsed")
         return (f"Créditos {round(perc) if pd.notna(perc) else '?'}% consumidos com {round(el) if pd.notna(el) else '?'}% do prazo — consumo acima do ritmo do contrato",
@@ -631,6 +629,11 @@ def motivo_of(r: pd.Series):
         s = "; ".join(parts) if parts else "Sinais de baixa atividade"
         s = s[0].upper() + s[1:]
         return (s, "Validar uso real com o cliente (créditos baixos podem refletir uso de Enterprise/apps)")
+    if t == 2:
+        dse = r.get("days_since_eff")
+        if dse is None or pd.isna(dse):
+            return ("Sem nenhum contato efetivo registrado", "Fazer um contato ativo com o cliente essa semana")
+        return (f"Sem contato efetivo há {int(dse)} dias", "Fazer um contato ativo com o cliente essa semana")
     if (r.get("eff_90") or 0) == 0:
         return ("Uso recente e consumo estável, contato do CS escasso (perfil autônomo)",
                 "Manter baixa intensidade; contato preventivo trimestral")
