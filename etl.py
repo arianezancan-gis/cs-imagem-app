@@ -30,6 +30,7 @@ RISCO_ORDER = ["Crítico", "Alto", "Médio", "Baixo"]
 RISCO_COLOR = {"Crítico": "#d03b3b", "Alto": "#ec835a", "Médio": "#e0a100", "Baixo": "#2f9a3b"}
 MODALIDADE_LABEL = {1: "Tech Touch", 2: "Low Touch", 3: "Mid Touch", 4: "High Touch", 5: "New Logo"}
 ESTRATEGIA_CS_LABEL = {1: "Agenda", 2: "Email", 3: "Sem Atuação", 4: "Definir"}
+AGOL_LABEL = {1: "Sim", 2: "Não"}
 
 # Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
 # entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
@@ -396,8 +397,10 @@ def _consumo_stats(consumo: pd.DataFrame, today: pd.Timestamp):
 # ============================================================================
 # classificação de risco por pontuação ponderada
 # (réplica linha-a-linha da regra Arcade que já roda na camada calculada do
-# ArcGIS — mesmos pesos, mesmos limiares, mesma ordem de avaliação. Contas
-# com AGOL=2 ficam de fora, igual ao Arcade original.)
+# ArcGIS — mesmos pesos, mesmos limiares, mesma ordem de avaliação. Diferente
+# do Arcade original, contas sem AGOL não são excluídas daqui — elas entram
+# na régua normalmente (tendem a pontuar baixo por falta de dado de consumo);
+# quem quiser tirá-las da visão usa o filtro "AGOL" na tela inicial.)
 # ============================================================================
 def _ultimo_consumo(consumo: pd.DataFrame) -> pd.DataFrame:
     """Uma linha por conta: o snapshot de consumo mais recente (sem agregar por
@@ -539,9 +542,10 @@ def _classifica_risco(total):
 
 def compute_risk_score(contas: pd.DataFrame, consumo: pd.DataFrame, evento: pd.DataFrame,
                         today: pd.Timestamp) -> pd.DataFrame:
-    """Réplica da regra Arcade: uma linha por conta (exceto AGOL=2, excluídas igual
-    ao original) com cada peso, o total e a classificação final (peso_risco)."""
-    c = contas[contas.get("AGOL") != 2].copy()
+    """Réplica da regra Arcade: uma linha por conta — todas entram, inclusive as
+    sem AGOL (o filtro "AGOL" na tela inicial é quem decide se elas aparecem) —
+    com cada peso, o total e a classificação final (peso_risco)."""
+    c = contas.copy()
     if c.empty:
         return pd.DataFrame(columns=["IDCONTA"])
 
