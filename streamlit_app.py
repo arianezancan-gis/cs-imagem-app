@@ -420,8 +420,9 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict, key_prefix: st
 # ============================================================================
 def risco_kpis(F: pd.DataFrame):
     r = F[F["peso_risco"].notna()]
-    cols = st.columns(4)
-    for col, label in zip(cols, RISCO_ORDER):
+    cols = st.columns(5)
+    cols[0].metric("Total de contas", len(F))
+    for col, label in zip(cols[1:], RISCO_ORDER):
         col.metric(label, int((r["peso_risco"] == label).sum()))
 
 
