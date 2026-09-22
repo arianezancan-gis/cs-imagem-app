@@ -295,7 +295,7 @@ def _event_stats(ev: pd.DataFrame, today: pd.Timestamp) -> dict:
         return out
     for idc, g in ev.groupby("IDCONTA"):
         g = g.sort_values("DATA")
-        eff = g[(g["touch"]) & (g["STATUS"] == 2) & (~g["attempt"])]
+        eff = g[g["FORMATO"] != 7]
         noresp = g[(g["touch"]) & (g["STATUS"] == 0)]
         last_eff = eff["DATA"].max() if len(eff) else pd.NaT
         gm = g[g["cat"] != 4]
