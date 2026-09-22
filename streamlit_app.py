@@ -27,7 +27,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(__file__))
 from etl import (
-    ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR,
+    ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR, MODALIDADE_LABEL,
     build_portfolio, generate_token, load_portfolio_raw,
 )
 
@@ -151,7 +151,10 @@ def filters_ui(acc: pd.DataFrame):
         parc_sel = st.selectbox("Parceiro", ["Todos"] + parc_vals)
     with c4:
         mod_vals = sorted(acc["MODALIDADE_ATENDIMENTO"].dropna().unique().tolist())
-        mod_sel = st.selectbox("Modalidade", ["Todas"] + [str(m) for m in mod_vals])
+        mod_sel = st.selectbox(
+            "Modalidade", ["Todas"] + mod_vals,
+            format_func=lambda m: m if m == "Todas" else MODALIDADE_LABEL.get(int(m), str(m)),
+        )
     with c5:
         risco_sel = st.multiselect("Classificação de risco", options=RISCO_ORDER, default=RISCO_ORDER)
     q = st.text_input("Buscar conta", "")
@@ -162,7 +165,7 @@ def filters_ui(acc: pd.DataFrame):
     if parc_sel != "Todos":
         f = f[f["PARCEIRO"].fillna("(sem parceiro)") == parc_sel]
     if mod_sel != "Todas":
-        f = f[f["MODALIDADE_ATENDIMENTO"].astype(str) == mod_sel]
+        f = f[f["MODALIDADE_ATENDIMENTO"] == mod_sel]
     # contas fora da régua (ex.: AGOL não licenciado) não têm peso_risco — deixa
     # passar sempre, o filtro só restringe quem TEM classificação
     f = f[f["peso_risco"].isna() | f["peso_risco"].isin(risco_sel)]
