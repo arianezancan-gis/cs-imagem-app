@@ -28,7 +28,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(__file__))
 from etl import (
     ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR, MODALIDADE_LABEL,
-    build_portfolio, generate_token, load_portfolio_raw,
+    ESTRATEGIA_CS_LABEL, build_portfolio, generate_token, load_portfolio_raw,
 )
 
 st.set_page_config(page_title="Painel da carteira ArcGIS", layout="wide")
@@ -137,7 +137,7 @@ def sidebar():
 # ============================================================================
 def filters_ui(acc: pd.DataFrame):
     st.markdown("#### Filtros")
-    c1, c2, c3, c4, c5 = st.columns([1.6, 1, 1, 1, 1.4])
+    c1, c2, c3, c4, c5, c6 = st.columns([1.3, 0.9, 0.9, 0.9, 0.9, 1.1])
     with c1:
         tiers_sel = st.multiselect(
             "Prioridade", options=list(TIER_LABEL.keys()),
@@ -156,6 +156,12 @@ def filters_ui(acc: pd.DataFrame):
             format_func=lambda m: MODALIDADE_LABEL.get(int(m), str(m)),
         )
     with c5:
+        est_vals = sorted(acc["ESTRATEGIA_CS"].dropna().unique().tolist())
+        est_sel = st.multiselect(
+            "Estratégia CS", options=est_vals, default=est_vals,
+            format_func=lambda e: ESTRATEGIA_CS_LABEL.get(int(e), str(e)),
+        )
+    with c6:
         risco_sel = st.multiselect("Classificação de risco", options=RISCO_ORDER, default=RISCO_ORDER)
     q = st.text_input("Buscar conta", "")
 
@@ -165,6 +171,7 @@ def filters_ui(acc: pd.DataFrame):
     if parc_sel != "Todos":
         f = f[f["PARCEIRO"].fillna("(sem parceiro)") == parc_sel]
     f = f[f["MODALIDADE_ATENDIMENTO"].isin(mod_sel)]
+    f = f[f["ESTRATEGIA_CS"].isin(est_sel)]
     # contas fora da régua (ex.: AGOL não licenciado) não têm peso_risco — deixa
     # passar sempre, o filtro só restringe quem TEM classificação
     f = f[f["peso_risco"].isna() | f["peso_risco"].isin(risco_sel)]
