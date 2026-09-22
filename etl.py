@@ -421,7 +421,14 @@ def build_portfolio(contas: pd.DataFrame, contato: pd.DataFrame, enduser: pd.Dat
     if contas.empty:
         return contas, {}, {}, None, today, missing
 
-    n_contatos = contato.groupby("IDCONTA").size().rename("n_contatos") if len(contato) else pd.Series(dtype="int64", name="n_contatos")
+    if len(contato):
+        n_contatos = contato.groupby("IDCONTA").size().rename("n_contatos")
+    else:
+        # Series vazia, mas com o índice NOMEADO "IDCONTA" — sem isso, o merge()
+        # abaixo (on="IDCONTA") não acha a chave do lado direito e quebra com
+        # KeyError: 'IDCONTA'. Acontece quando nenhuma conta do analista tem
+        # registro em CONTATO_1 (ex.: carteira nova, ou colega sem contatos cadastrados).
+        n_contatos = pd.Series(dtype="int64", name="n_contatos", index=pd.Index([], name="IDCONTA"))
 
     ev = _classify_events(evento)
     ev_stats = _event_stats(ev, today)
