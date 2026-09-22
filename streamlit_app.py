@@ -189,7 +189,7 @@ def kpis(F: pd.DataFrame, acc_total: int):
 # ============================================================================
 # gráficos
 # ============================================================================
-def chart_tiers(acc_scope: pd.DataFrame):
+def chart_tiers(acc_scope: pd.DataFrame, key_prefix: str = "tiers"):
     counts = acc_scope["t"].value_counts().reindex(TIER_LABEL.keys(), fill_value=0)
     fig = go.Figure(go.Bar(
         x=counts.values, y=[TIER_LABEL[t] for t in counts.index], orientation="h",
@@ -198,10 +198,10 @@ def chart_tiers(acc_scope: pd.DataFrame):
     ))
     fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"),
                        xaxis_title=None, showlegend=False, plot_bgcolor="white")
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def chart_scatter(F: pd.DataFrame):
+def chart_scatter(F: pd.DataFrame, key_prefix: str = "scatter"):
     pts = F[F["hasUse"] & (F["tot_cred"] > 0) & F["perc"].notna() & F["elapsed"].notna()]
     if pts.empty:
         st.info("Sem contas com pacote e consumo AGOL para a seleção.")
@@ -220,11 +220,11 @@ def chart_scatter(F: pd.DataFrame):
                        xaxis_title="% do prazo do contrato decorrido", yaxis_title="% créditos consumidos",
                        xaxis_range=[0, 112], yaxis_range=[0, 112], plot_bgcolor="white",
                        legend=dict(orientation="h", y=-0.2))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
     st.caption(f"{len(pts)} contas com pacote e consumo AGOL; {len(F)-len(pts)} ficam de fora (só Enterprise ou sem pacote). Eixos limitados a 110%.")
 
 
-def chart_renew(F: pd.DataFrame, today: pd.Timestamp):
+def chart_renew(F: pd.DataFrame, today: pd.Timestamp, key_prefix: str = "renew"):
     rows = F[(F["t"] != 7) & F["days_to_end"].notna() & (F["days_to_end"] >= -90) & (F["days_to_end"] <= 90)]
     rows = rows.sort_values("days_to_end")
     if rows.empty:
@@ -242,10 +242,10 @@ def chart_renew(F: pd.DataFrame, today: pd.Timestamp):
     fig.update_layout(height=max(240, 26 * len(rows)), margin=dict(l=10, r=10, t=10, b=10),
                        xaxis_title="dias até o fim do contrato (negativo = já venceu)",
                        yaxis=dict(autorange="reversed"), plot_bgcolor="white", legend=dict(orientation="h", y=-0.15))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def chart_adoption(F: pd.DataFrame, series: dict):
+def chart_adoption(F: pd.DataFrame, series: dict, key_prefix: str = "adoption"):
     sc = F[(F["t"] != 7)]
     months: dict[int, dict] = {}
     for idc in sc["IDCONTA"]:
@@ -273,10 +273,10 @@ def chart_adoption(F: pd.DataFrame, series: dict):
                               name="Cadastrados", line=dict(color="#eb6834", width=2)))
     fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
                        legend=dict(orientation="h", y=-0.25))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def chart_events(F: pd.DataFrame, monthly_map: dict):
+def chart_events(F: pd.DataFrame, monthly_map: dict, key_prefix: str = "events"):
     ids = F.loc[F["t"] != 7, "IDCONTA"]
     combined = None
     for idc in ids:
@@ -299,7 +299,7 @@ def chart_events(F: pd.DataFrame, monthly_map: dict):
         fig.add_trace(go.Bar(x=labels, y=combined[c].values, name=names[c], marker_color=colors[c]))
     fig.update_layout(barmode="stack", height=280, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
                        legend=dict(orientation="h", y=-0.25))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
     st.caption("Campanhas em massa não são interação individual com o cliente.")
 
 
@@ -316,7 +316,7 @@ def quality_panel(F: pd.DataFrame):
         st.progress(min(1.0, pct))
 
 
-def vertical_table(F: pd.DataFrame):
+def vertical_table(F: pd.DataFrame, key_prefix: str = "vertical"):
     sc = F[F["t"] != 7]
     if sc.empty:
         st.info("Sem contas para a seleção.")
@@ -334,13 +334,13 @@ def vertical_table(F: pd.DataFrame):
     g["Efetivos 90d (média)"] = g["efetivos_media"].round(1)
     out = g[["VERTICAL", "contas", "Login ≤30d", "% créditos (mediana)", "Efetivos 90d (média)", "sem_contato"]]
     out.columns = ["Vertical", "Contas", "Login ≤30d", "% créditos consumidos (mediana)", "Contatos efetivos 90d (média)", "Sem contato 90d"]
-    st.dataframe(out, use_container_width=True, hide_index=True)
+    st.dataframe(out, use_container_width=True, hide_index=True, key=f"table_{key_prefix}")
 
 
 # ============================================================================
 # tabela principal + detalhe
 # ============================================================================
-def accounts_table(F: pd.DataFrame):
+def accounts_table(F: pd.DataFrame, key_prefix: str = "accounts"):
     show = F.copy()
     show["Prioridade"] = show["t"].map(TIER_LABEL)
     show["Créditos consumidos"] = show["perc"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "—")
@@ -352,15 +352,15 @@ def accounts_table(F: pd.DataFrame):
     labels = ["Conta", "Prioridade", "Motivo principal", "Fim do contrato (d)", "Créditos consumidos",
               "Prazo decorrido", "Último login (d)", "Efetivos 90d"]
     tbl = show[cols].rename(columns=dict(zip(cols, labels))).sort_values("Prioridade")
-    st.dataframe(tbl, use_container_width=True, hide_index=True, height=420)
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
 
 
-def account_detail(acc: pd.DataFrame, series: dict, events: dict):
+def account_detail(acc: pd.DataFrame, series: dict, events: dict, key_prefix: str = "detail"):
     st.markdown("#### Detalhe da conta")
     names = acc.sort_values("NOME_CONTA")["NOME_CONTA"].tolist()
     if not names:
         return
-    sel = st.selectbox("Escolha uma conta", names)
+    sel = st.selectbox("Escolha uma conta", names, key=f"select_{key_prefix}")
     a = acc[acc["NOME_CONTA"] == sel].iloc[0]
 
     c1, c2 = st.columns([2, 1])
@@ -385,7 +385,7 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict):
                                   fillcolor="rgba(42,120,214,.12)"))
         fig.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10), title="% do pacote consumido",
                            plot_bgcolor="white", yaxis_range=[0, max(105, df['perc'].max()*1.05)])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}_perc")
 
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=df["data"], y=df["ativados"], mode="lines+markers", name="Ativados",
@@ -394,7 +394,7 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict):
                                    line=dict(color="#eb6834", width=2)))
         fig2.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10), title="Usuários ativados e cadastrados",
                             plot_bgcolor="white", legend=dict(orientation="h", y=-0.3))
-        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}_users")
     else:
         st.caption("Sem série de consumo AGOL para esta conta.")
 
@@ -451,7 +451,7 @@ def spotlight_accounts(F: pd.DataFrame, n: int = 3):
                 st.caption(f"Contrato vence em {dte} dias" if dte >= 0 else f"Contrato vencido há {-dte} dias")
 
 
-def risk_accounts_table(F: pd.DataFrame):
+def risk_accounts_table(F: pd.DataFrame, key_prefix: str = "risk"):
     """Todas as contas em risco, priorizadas — a lista de trabalho por trás dos KPIs."""
     risk = F[F["t"].isin(RISK_TIERS)].copy()
     if risk.empty:
@@ -462,7 +462,8 @@ def risk_accounts_table(F: pd.DataFrame):
     cols = ["NOME_CONTA", "Prioridade", "mot", "ac", "Vence em (dias)"]
     labels = ["Conta", "Prioridade", "Motivo", "Próximo passo", "Vence em (dias)"]
     tbl = risk[cols].rename(columns=dict(zip(cols, labels))).sort_values("Prioridade")
-    st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(420, 80 + 35 * len(tbl)))
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(420, 80 + 35 * len(tbl)),
+                 key=f"table_{key_prefix}")
 
 
 def executive_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp):
@@ -472,28 +473,28 @@ def executive_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dic
     c1, c2 = st.columns([1, 2])
     with c1:
         st.markdown("##### Contas por prioridade")
-        chart_tiers(F)
+        chart_tiers(F, key_prefix="exec_tiers")
     with c2:
         st.markdown("##### Contratos vencendo (±90 dias)")
-        chart_renew(F, today)
+        chart_renew(F, today, key_prefix="exec_renew")
 
     st.markdown("---")
     st.markdown("##### Contas em risco agora — e o que estamos fazendo a respeito")
     spotlight_accounts(F)
 
     st.markdown("##### Todas as contas em risco, priorizadas")
-    risk_accounts_table(F)
+    risk_accounts_table(F, key_prefix="exec_risk")
 
     with st.expander("Ver painel completo do analista (consumo, adoção, atividade do time)"):
         st.caption("Detalhe operacional do dia a dia — não recomendado pra apresentação.")
-        analyst_view(F, acc, series, events, today, with_kpis=False)
+        analyst_view(F, acc, series, events, today, with_kpis=False, key_prefix="exec_nested")
 
 
 # ============================================================================
 # visão analista — o painel de trabalho completo, granular
 # ============================================================================
 def analyst_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp,
-                  with_kpis: bool = True):
+                  with_kpis: bool = True, key_prefix: str = "analyst"):
     if with_kpis:
         kpis(F, len(acc))
         st.markdown("---")
@@ -501,35 +502,35 @@ def analyst_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict,
     c1, c2 = st.columns([1, 2])
     with c1:
         st.markdown("##### Onde estão as contas")
-        chart_tiers(F)
+        chart_tiers(F, key_prefix=f"{key_prefix}_tiers")
     with c2:
         st.markdown("##### Consumo de créditos × prazo do contrato")
-        chart_scatter(F)
+        chart_scatter(F, key_prefix=f"{key_prefix}_scatter")
 
     c3, c4 = st.columns(2)
     with c3:
         st.markdown("##### Contratos vencendo (±90 dias)")
-        chart_renew(F, today)
+        chart_renew(F, today, key_prefix=f"{key_prefix}_renew")
     with c4:
         st.markdown("##### Adoção ao longo do tempo")
-        chart_adoption(F, series)
+        chart_adoption(F, series, key_prefix=f"{key_prefix}_adoption")
 
     c5, c6 = st.columns(2)
     with c5:
         st.markdown("##### O que o CS está fazendo")
-        chart_events(F, events["monthly"])
+        chart_events(F, events["monthly"], key_prefix=f"{key_prefix}_events")
     with c6:
         st.markdown("##### Qualidade do cadastro")
         quality_panel(F)
 
     st.markdown("##### Por vertical")
-    vertical_table(F)
+    vertical_table(F, key_prefix=f"{key_prefix}_vertical")
 
     st.markdown("##### Contas")
-    accounts_table(F)
+    accounts_table(F, key_prefix=f"{key_prefix}_accounts")
 
     st.markdown("---")
-    account_detail(F if len(F) else acc, series, events)
+    account_detail(F if len(F) else acc, series, events, key_prefix=f"{key_prefix}_detail")
 
 
 # ============================================================================
