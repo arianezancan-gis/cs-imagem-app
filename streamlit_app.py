@@ -411,40 +411,92 @@ def account_detail(acc: pd.DataFrame, series: dict, events: dict):
 
 
 # ============================================================================
-# main
+# visão executiva — uma tela, foco em risco (pra apresentação)
 # ============================================================================
-def main():
-    _init_state()
-    st.title("Painel da carteira ArcGIS")
-    st.caption("Dados ao vivo do Feature Service, filtrados pelo analista CS. Prioridade e motivo são calculados por regras automáticas — não são as análises manuais do relatório.")
+RISK_TIERS = [1, 2, 3, 6]  # foco imediato, foco da semana, monitoramento, saúde desconhecida
 
-    sidebar()
 
-    if not st.session_state.loaded:
-        st.info("Preencha a conexão na barra lateral e clique em **Carregar carteira**.")
+def risk_kpis(F: pd.DataFrame, acc_total: int):
+    sc = F[F["t"] != 7]
+    risk = sc[sc["t"].isin(RISK_TIERS)]
+    ren60 = sc[sc["days_to_end"].notna() & (sc["days_to_end"] <= 60)]
+    sem_contato = sc[sc["eff_90"] == 0]
+    credit_risk = risk.loc[risk["hasUse"], "tot_cred"].sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contas em risco", len(risk), f"de {len(sc)} na seleção")
+    c2.metric("Renovação em até 60 dias", len(ren60))
+    c3.metric("Sem contato efetivo em 90 dias", len(sem_contato))
+    c4.metric("Créditos em risco (pacote)", f"{credit_risk:,.0f}".replace(",", "."))
+
+
+def spotlight_accounts(F: pd.DataFrame, n: int = 3):
+    """As contas mais urgentes, contadas como história: motivo + o que já está sendo feito."""
+    risk = F[F["t"].isin(RISK_TIERS)].copy()
+    if risk.empty:
+        st.info("Nenhuma conta em risco na seleção atual.")
         return
+    risk["_ord"] = risk["days_to_end"].fillna(9999)
+    risk = risk.sort_values(["t", "_ord"]).head(n)
 
-    acc = st.session_state.acc
-    series = st.session_state.series
-    events = st.session_state.events
-    ref_date = st.session_state.ref_date
-    today = st.session_state.today
+    cols = st.columns(len(risk))
+    for col, (_, a) in zip(cols, risk.iterrows()):
+        with col:
+            cor = "red" if a["t"] in (1, 2, 6) else "orange"
+            st.markdown(f":{cor}[**{a['NOME_CONTA']}**]  ·  {TIER_LABEL[a['t']]}")
+            st.caption(a["mot"])
+            st.success(f"Próximo passo: {a['ac']}")
+            if pd.notna(a.get("days_to_end")):
+                dte = int(a["days_to_end"])
+                st.caption(f"Contrato vence em {dte} dias" if dte >= 0 else f"Contrato vencido há {-dte} dias")
 
-    sub = f"{len(acc)} contas cadastradas"
-    if ref_date is not None:
-        sub += f" · consumo AGOL até {ref_date.strftime('%d/%m/%Y')}"
-    sub += f" · posição em {today.strftime('%d/%m/%Y')}"
-    st.caption(sub)
 
-    if st.session_state.get("missing"):
-        missing = st.session_state.missing
-        detail = " · ".join(f"{layer}: {', '.join(cols)}" for layer, cols in missing.items())
-        st.warning(f"Alguns campos esperados não foram encontrados no serviço e foram tratados como vazios (pode afetar prioridade/motivo). {detail}")
+def risk_accounts_table(F: pd.DataFrame):
+    """Todas as contas em risco, priorizadas — a lista de trabalho por trás dos KPIs."""
+    risk = F[F["t"].isin(RISK_TIERS)].copy()
+    if risk.empty:
+        st.info("Nenhuma conta em risco na seleção atual.")
+        return
+    risk["Prioridade"] = risk["t"].map(TIER_LABEL)
+    risk["Vence em (dias)"] = risk["days_to_end"]
+    cols = ["NOME_CONTA", "Prioridade", "mot", "ac", "Vence em (dias)"]
+    labels = ["Conta", "Prioridade", "Motivo", "Próximo passo", "Vence em (dias)"]
+    tbl = risk[cols].rename(columns=dict(zip(cols, labels))).sort_values("Prioridade")
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(420, 80 + 35 * len(tbl)))
 
-    F = filters_ui(acc)
+
+def executive_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp):
+    risk_kpis(F, len(acc))
     st.markdown("---")
-    kpis(F, len(acc))
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.markdown("##### Contas por prioridade")
+        chart_tiers(F)
+    with c2:
+        st.markdown("##### Contratos vencendo (±90 dias)")
+        chart_renew(F, today)
+
     st.markdown("---")
+    st.markdown("##### Contas em risco agora — e o que estamos fazendo a respeito")
+    spotlight_accounts(F)
+
+    st.markdown("##### Todas as contas em risco, priorizadas")
+    risk_accounts_table(F)
+
+    with st.expander("Ver painel completo do analista (consumo, adoção, atividade do time)"):
+        st.caption("Detalhe operacional do dia a dia — não recomendado pra apresentação.")
+        analyst_view(F, acc, series, events, today, with_kpis=False)
+
+
+# ============================================================================
+# visão analista — o painel de trabalho completo, granular
+# ============================================================================
+def analyst_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp,
+                  with_kpis: bool = True):
+    if with_kpis:
+        kpis(F, len(acc))
+        st.markdown("---")
 
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -478,6 +530,51 @@ def main():
 
     st.markdown("---")
     account_detail(F if len(F) else acc, series, events)
+
+
+# ============================================================================
+# main
+# ============================================================================
+def main():
+    _init_state()
+    st.title("Painel da carteira ArcGIS")
+    st.caption("Dados ao vivo do Feature Service, filtrados pelo analista CS. Prioridade e motivo são calculados por regras automáticas — não são as análises manuais do relatório.")
+
+    view_mode = st.sidebar.radio(
+        "Visão", ["Executiva (apresentação)", "Analista (completa)"], index=0,
+        help="Executiva: uma tela, focada em risco — pra apresentar. Analista: o painel completo do dia a dia.",
+    )
+    st.sidebar.markdown("---")
+    sidebar()
+
+    if not st.session_state.loaded:
+        st.info("Preencha a conexão na barra lateral e clique em **Carregar carteira**.")
+        return
+
+    acc = st.session_state.acc
+    series = st.session_state.series
+    events = st.session_state.events
+    ref_date = st.session_state.ref_date
+    today = st.session_state.today
+
+    sub = f"{len(acc)} contas cadastradas"
+    if ref_date is not None:
+        sub += f" · consumo AGOL até {ref_date.strftime('%d/%m/%Y')}"
+    sub += f" · posição em {today.strftime('%d/%m/%Y')}"
+    st.caption(sub)
+
+    if st.session_state.get("missing"):
+        missing = st.session_state.missing
+        detail = " · ".join(f"{layer}: {', '.join(cols)}" for layer, cols in missing.items())
+        st.warning(f"Alguns campos esperados não foram encontrados no serviço e foram tratados como vazios (pode afetar prioridade/motivo). {detail}")
+
+    F = filters_ui(acc)
+    st.markdown("---")
+
+    if view_mode.startswith("Executiva"):
+        executive_view(F, acc, series, events, today)
+    else:
+        analyst_view(F, acc, series, events, today)
 
 
 if __name__ == "__main__":
