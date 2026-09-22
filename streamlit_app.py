@@ -497,7 +497,7 @@ def risco_view(F: pd.DataFrame):
         st.markdown("##### Como a pontuação é calculada")
         risco_metodologia()
 
-    st.markdown("##### Todas as contas, priorizadas pela pontuação (pior primeiro)")
+    st.markdown("##### Todas as contas, ordenadas da menor para a maior pontuação")
     risco_table(F)
 
 
