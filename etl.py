@@ -444,19 +444,22 @@ def _first_true(pairs, default=0):
 
 
 def _peso_consumo(modalidade, perc, dias_ini):
+    """dias_ini == 60 ou == 180 (exatamente no limite) entra na faixa de ritmo
+    mais rápido (o peso maior) — fecha a lacuna que a regra original (só > e <,
+    sem =) deixava nesses dois pontos exatos."""
     if pd.isna(perc) or perc == 0:
         return 0
     gt = lambda x: pd.notna(dias_ini) and dias_ini > x
-    lt = lambda x: pd.notna(dias_ini) and dias_ini < x
+    le = lambda x: pd.notna(dias_ini) and dias_ini <= x
     if modalidade == 1:
         return _first_true([
-            (0 < perc <= 10 and gt(60), 10), (0 < perc <= 10 and lt(60), 12),
-            (10 < perc <= 50 and gt(180), 15), (10 < perc <= 50 and lt(180), 20),
+            (0 < perc <= 10 and gt(60), 10), (0 < perc <= 10 and le(60), 12),
+            (10 < perc <= 50 and gt(180), 15), (10 < perc <= 50 and le(180), 20),
             (perc > 50, 25),
         ])
     return _first_true([
-        (0 < perc <= 10 and gt(60), 7), (0 < perc <= 10 and lt(60), 10),
-        (10 < perc <= 50 and gt(180), 12), (10 < perc <= 50 and lt(180), 17),
+        (0 < perc <= 10 and gt(60), 7), (0 < perc <= 10 and le(60), 10),
+        (10 < perc <= 50 and gt(180), 12), (10 < perc <= 50 and le(180), 17),
         (perc > 50, 20),
     ])
 
@@ -505,7 +508,11 @@ def _peso_contato(modalidade, um_um, um_muitos):
             (v_uu == 0 and v_um == 0, 0),
         ])
     if modalidade == 2:
-        return _first_true([(base_uu >= 1 and base_um >= 1, 20), (base_uu == 0 and base_um == 0, 0)])
+        return _first_true([
+            (base_uu >= 1 and base_um >= 1, 20),
+            (base_uu == 0 and base_um == 0, 0),
+            (base_uu >= 1 or base_um >= 1, 10),
+        ])
     if modalidade == 1:
         return _first_true([(base_um > 1, 20), (base_uu > 0 and base_um > 0, 20), (base_um == 1, 10)])
     return 0
