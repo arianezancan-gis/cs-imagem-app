@@ -28,7 +28,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(__file__))
 from etl import (
     ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR, MODALIDADE_LABEL,
-    ESTRATEGIA_CS_LABEL, AGOL_LABEL, build_portfolio, generate_token, load_portfolio_raw,
+    ESTRATEGIA_CS_LABEL, AGOL_LABEL, STATUS_LABEL, build_portfolio, generate_token, load_portfolio_raw,
 )
 
 st.set_page_config(page_title="Painel da carteira ArcGIS", layout="wide")
@@ -174,6 +174,14 @@ def filters_ui(acc: pd.DataFrame):
     with c8:
         q = st.text_input("Buscar conta", "")
 
+    c9 = st.columns([1.6, 3.4])[0]
+    with c9:
+        status_vals = sorted(acc["STATUS"].dropna().unique().tolist())
+        status_sel = st.multiselect(
+            "Status", options=status_vals, default=status_vals,
+            format_func=lambda s: STATUS_LABEL.get(int(s), str(s)),
+        )
+
     f = acc[acc["t"].isin(tiers_sel)]
     if vert_sel != "Todas":
         f = f[f["VERTICAL"] == vert_sel]
@@ -182,6 +190,7 @@ def filters_ui(acc: pd.DataFrame):
     f = f[f["MODALIDADE_ATENDIMENTO"].isin(mod_sel)]
     f = f[f["ESTRATEGIA_CS"].isin(est_sel)]
     f = f[f["AGOL"].isin(agol_sel)]
+    f = f[f["STATUS"].isin(status_sel)]
     # contas fora da régua (ex.: sem dado de consumo) não têm peso_risco — deixa
     # passar sempre, o filtro só restringe quem TEM classificação
     f = f[f["peso_risco"].isna() | f["peso_risco"].isin(risco_sel)]
