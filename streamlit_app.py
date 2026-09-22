@@ -213,7 +213,7 @@ def kpis(F: pd.DataFrame, acc_total: int):
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Contas na seleção", len(F), f"{acc_total} na base")
-    c2.metric("Foco imediato/semana", f12, "prioridades 1 e 2")
+    c2.metric("Foco do dia/semana", f12, "prioridades 1 e 2")
     c3.metric("Vencidos/vencendo em 60d", ren)
     c4.metric("Sem contato efetivo em 90d", f"{100*sem/len(sc):.0f}%" if len(sc) else "—", f"{sem} de {len(sc)}")
     c5.metric("Ativados / cadastrados", f"{100*act/us:.0f}%" if us else "—", f"{int(act)} de {int(us)}")
@@ -533,7 +533,7 @@ def risco_view(F: pd.DataFrame):
 # ============================================================================
 # visão executiva — uma tela, foco em risco (pra apresentação)
 # ============================================================================
-RISK_TIERS = [1, 2, 3, 6]  # foco imediato, foco da semana, monitoramento, saúde desconhecida
+RISK_TIERS = [1, 2, 3, 6]  # foco do dia, foco da semana, monitoramento, saúde desconhecida
 
 
 def risk_kpis(F: pd.DataFrame, acc_total: int):
