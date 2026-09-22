@@ -42,7 +42,7 @@ EVENT_STATUS_LABEL = {-1: "", 0: "sem resposta", 1: "reagendado", 2: "efetivado"
 # ============================================================================
 def _init_state():
     for k, v in dict(loaded=False, acc=None, series=None, events=None, ref_date=None, today=None,
-                      analista="", err=None).items():
+                      analista="", err=None, missing=None).items():
         st.session_state.setdefault(k, v)
 
 
@@ -58,10 +58,10 @@ def _load(base_url, analista, token):
             st.session_state.loaded = False
             return
         prog.info("Processando…")
-        acc, series, events, ref_date, today = build_portfolio(contas, contato, enduser, evento, consumo)
+        acc, series, events, ref_date, today, missing = build_portfolio(contas, contato, enduser, evento, consumo)
         prog.empty()
         st.session_state.update(loaded=True, acc=acc, series=series, events=events,
-                                 ref_date=ref_date, today=today, analista=analista, err=None)
+                                 ref_date=ref_date, today=today, analista=analista, err=None, missing=missing)
     except ArcGISError as e:
         prog.empty()
         st.session_state.err = f"Erro do ArcGIS: {e}"
@@ -119,6 +119,10 @@ def sidebar():
         st.sidebar.error(st.session_state.err)
     if st.session_state.get("loaded"):
         st.sidebar.success(f"{len(st.session_state.acc)} contas carregadas de {st.session_state.analista}")
+        if st.session_state.get("missing"):
+            st.sidebar.warning("Campos não encontrados no serviço (tratados como vazios):\n" + "\n".join(
+                f"- {layer}: {', '.join(cols)}" for layer, cols in st.session_state.missing.items()
+            ))
 
 
 # ============================================================================
@@ -425,6 +429,11 @@ def main():
         sub += f" · consumo AGOL até {ref_date.strftime('%d/%m/%Y')}"
     sub += f" · posição em {today.strftime('%d/%m/%Y')}"
     st.caption(sub)
+
+    if st.session_state.get("missing"):
+        missing = st.session_state.missing
+        detail = " · ".join(f"{layer}: {', '.join(cols)}" for layer, cols in missing.items())
+        st.warning(f"Alguns campos esperados não foram encontrados no serviço e foram tratados como vazios (pode afetar prioridade/motivo). {detail}")
 
     F = filters_ui(acc)
     st.markdown("---")
