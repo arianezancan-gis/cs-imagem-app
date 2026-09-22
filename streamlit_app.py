@@ -687,6 +687,14 @@ def main():
     sub += f" · posição em {today.strftime('%d/%m/%Y')}"
     st.caption(sub)
 
+    if ref_date is not None:
+        dias_desde_atualizacao = (today - ref_date).days
+        msg = f"Dado de consumo AGOL atualizado pela última vez há {dias_desde_atualizacao} dia(s) ({ref_date.strftime('%d/%m/%Y')})."
+        if dias_desde_atualizacao > 15:
+            st.error(msg)
+        else:
+            st.caption(msg)
+
     if st.session_state.get("missing"):
         missing = st.session_state.missing
         detail = " · ".join(f"{layer}: {', '.join(cols)}" for layer, cols in missing.items())
