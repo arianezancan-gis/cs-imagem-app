@@ -14,7 +14,7 @@ import requests
 LAYER_IDS = {"contas": 0, "contato": 1, "enduser": 2, "evento": 3, "consumo": 6}
 
 TIER_LABEL = {
-    1: "Foco imediato", 2: "Foco da semana", 3: "Monitoramento", 4: "Oportunidade",
+    1: "Foco do dia", 2: "Foco da semana", 3: "Monitoramento", 4: "Oportunidade",
     5: "Estável", 6: "Saúde desconhecida",
 }
 
@@ -588,7 +588,7 @@ def compute_risk_score(contas: pd.DataFrame, consumo: pd.DataFrame, evento: pd.D
 
 def tier_of(r: pd.Series) -> int:
     if pd.isna(r.get("tot_cred")):
-        return 3 if (r.get("eff_90") or 0) > 0 else 6
+        return 6
     perc, dte, el, lg = r.get("perc"), r.get("days_to_end"), r.get("elapsed"), r.get("login_days")
     if (((pd.notna(perc) and perc >= 90 and pd.notna(dte) and dte > 45)
          or (pd.notna(perc) and perc >= 80 and pd.notna(el) and el < 50))
@@ -601,18 +601,15 @@ def tier_of(r: pd.Series) -> int:
         return 3
     dse = r.get("days_since_eff")
     if dse is None or pd.isna(dse) or dse > 30:
-        return 2
+        return 1 if r.get("MODALIDADE_ATENDIMENTO") == 4 else 2
     return 5
 
 
 def motivo_of(r: pd.Series):
     t = r["t"]
     if pd.isna(r.get("tot_cred")):
-        if t == 6:
-            return ("Sem dados de consumo AGOL (só Enterprise) e sem contato efetivo em 90 dias: não há evidência para afirmar saúde",
-                    "Tentar contato com o ponto de contato; obter dados de uso do Enterprise")
-        return (f"Adoção invisível (sem AGOL); relacionamento com {int(r.get('eff_90') or 0)} contato(s) efetivo(s) em 90 dias",
-                "Levantar uso do Enterprise com o cliente na próxima recorrência")
+        return ("Sem nenhum dado de consumo AGOL (só Enterprise): não há evidência de uso para afirmar saúde",
+                "Levantar uso do Enterprise com o cliente; obter dados de consumo AGOL")
     if t == 4:
         perc = r.get("perc"); el = r.get("elapsed")
         return (f"Créditos {round(perc) if pd.notna(perc) else '?'}% consumidos com {round(el) if pd.notna(el) else '?'}% do prazo — consumo acima do ritmo do contrato",
@@ -629,11 +626,11 @@ def motivo_of(r: pd.Series):
         s = "; ".join(parts) if parts else "Sinais de baixa atividade"
         s = s[0].upper() + s[1:]
         return (s, "Validar uso real com o cliente (créditos baixos podem refletir uso de Enterprise/apps)")
-    if t == 2:
+    if t in (1, 2):
         dse = r.get("days_since_eff")
-        if dse is None or pd.isna(dse):
-            return ("Sem nenhum contato efetivo registrado", "Fazer um contato ativo com o cliente essa semana")
-        return (f"Sem contato efetivo há {int(dse)} dias", "Fazer um contato ativo com o cliente essa semana")
+        msg = "Sem nenhum contato efetivo registrado" if (dse is None or pd.isna(dse)) else f"Sem contato efetivo há {int(dse)} dias"
+        prazo = "hoje" if t == 1 else "essa semana"
+        return (msg, f"Fazer um contato ativo com o cliente {prazo}")
     if (r.get("eff_90") or 0) == 0:
         return ("Uso recente e consumo estável, contato do CS escasso (perfil autônomo)",
                 "Manter baixa intensidade; contato preventivo trimestral")
