@@ -1,693 +1,698 @@
 """
-etl.py — conexão com o Feature Service (REST puro, sem SDK) e a mesma
-junção/agregação por IDCONTA usada no relatório e no painel HTML anterior,
-agora em pandas "nativo" para rodar dentro de um app Streamlit.
+Painel da carteira ArcGIS — versão Streamlit (Python nativo).
 
-Não depende de streamlit: pode ser testado isoladamente.
+Reaproveita a mesma lógica de junção/agregação por IDCONTA usada no
+relatório e na planilha originais (agora em etl.py), consultando o
+Feature Service ao vivo via REST puro (sem precisar da ArcGIS Maps SDK
+for JavaScript).
+
+Prioridade ("tier") e "motivo principal" são calculados por regras
+formulaicas (limiares sobre consumo, login, contatos etc.) — as mesmas
+regras de fallback usadas na planilha e no painel HTML anterior. As 34
+análises escritas à mão para as contas de foco imediato/da semana no
+relatório (TCRE, LD Celulose, Serasa...) não estão aqui: eram uma leitura
+manual de um momento específico e ficariam desatualizadas assim que os
+dados mudassem.
+
+Rodar localmente:
+    pip install -r requirements.txt
+    streamlit run streamlit_app.py
 """
-from __future__ import annotations
-
-import numpy as np
+import sys
+import os
+import traceback
 import pandas as pd
-import requests
+import plotly.graph_objects as go
+import streamlit as st
 
-LAYER_IDS = {"contas": 0, "contato": 1, "enduser": 2, "evento": 3, "consumo": 6}
+sys.path.insert(0, os.path.dirname(__file__))
+from etl import (
+    ArcGISError, TIER_COLOR, TIER_LABEL, EVENT_COLOR, RISCO_ORDER, RISCO_COLOR, MODALIDADE_LABEL,
+    ESTRATEGIA_CS_LABEL, AGOL_LABEL, build_portfolio, generate_token, load_portfolio_raw,
+)
 
-TIER_LABEL = {
-    1: "Foco imediato", 2: "Foco da semana", 3: "Monitoramento", 4: "Oportunidade",
-    5: "Estável", 6: "Saúde desconhecida", 7: "Fora do escopo (confirmar)",
-}
+st.set_page_config(page_title="Painel da carteira ArcGIS", layout="wide")
 
-# mesma paleta usada nos painéis HTML anteriores (já validada para a família de produtos)
-TIER_COLOR = {1: "#d03b3b", 2: "#ec835a", 3: "#e0a100", 4: "#2a78d6", 5: "#2f9a3b", 6: "#8b93a1", 7: "#c3c9d2"}
-EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf7a", "Contato/tentativa": "#eb6834"}
-
-# Classificação de risco por pontuação ponderada — réplica em Python da regra
-# Arcade que já roda na camada calculada do ArcGIS (mesmos pesos e limiares).
-# É a régua oficial: qualquer conta classificada aqui tem que bater com o que
-# o Arcade calcula na Feature Layer.
-RISCO_ORDER = ["Crítico", "Alto", "Médio", "Baixo"]
-RISCO_COLOR = {"Crítico": "#d03b3b", "Alto": "#ec835a", "Médio": "#e0a100", "Baixo": "#2f9a3b"}
-MODALIDADE_LABEL = {1: "Tech Touch", 2: "Low Touch", 3: "Mid Touch", 4: "High Touch", 5: "New Logo"}
-ESTRATEGIA_CS_LABEL = {1: "Agenda", 2: "Email", 3: "Sem Atuação", 4: "Definir"}
-AGOL_LABEL = {1: "Sim", 2: "Não"}
-
-# Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
-# entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
-# quebrar com KeyError, o app preenche o que faltar como vazio e avisa na tela
-# quais campos não foram encontrados, pra você conferir o nome exato no serviço.
-CONTAS_COLS = ["IDCONTA", "NOME_CONTA", "VERTICAL", "SUBSETOR", "PARCEIRO", "EXECUTIVO_RECORRENCIA",
-               "EXECUTIVO_NEGOCIOS", "ENGAJAMENTO", "MATURIDADE", "STATUS", "ESTRATEGIA_CS",
-               "ESTRATEGIA_ATENDIMENTO", "MODALIDADE_ATENDIMENTO", "ENTERPRISE", "AGOL", "ANALISTA_CS",
-               "QTDE_APPS"]
-CONTATO_COLS = ["IDCONTA"]
-ENDUSER_COLS = ["IDCONTA", "ENDUSER", "DEPARTAMENTO"]
-EVENTO_COLS = ["IDCONTA", "RESUMO", "FORMATO", "TIPO", "STATUS", "DATA"]
-CONSUMO_COLS = ["IDCONTA", "ENDUSER", "DATA", "CREDITOS", "TOTAL_CREDITOS", "TOTAL_USER", "TOTAL_ATIVADO",
-                "LAST_LOGIN", "DATA_INICIO", "DATA_FIM", "PERC_CREDITOS"]
-
-
-def _missing_fields(df: pd.DataFrame, expected: list[str]) -> list[str]:
-    return [c for c in expected if c not in df.columns]
-
-
-def _ensure_columns(df: pd.DataFrame, expected: list[str]) -> pd.DataFrame:
-    df = df.copy()
-    for c in expected:
-        if c not in df.columns:
-            df[c] = np.nan
-    return df
-
-
-def missing_fields_report(contas, contato, enduser, evento, consumo) -> dict[str, list[str]]:
-    """Campos esperados que não vieram do serviço, por camada (antes do padding)."""
-    report = {
-        "CONTAS_0": _missing_fields(contas, CONTAS_COLS),
-        "CONTATO_1": _missing_fields(contato, CONTATO_COLS),
-        "ENDUSER_2": _missing_fields(enduser, ENDUSER_COLS),
-        "EVENTO_3": _missing_fields(evento, EVENTO_COLS),
-        "CONSUMO_AGOL_6": _missing_fields(consumo, CONSUMO_COLS),
-    }
-    return {k: v for k, v in report.items() if v}
+DEFAULT_URL = "https://services2.arcgis.com/Az8bZXFPk4TfCJlZ/arcgis/rest/services/Acompanhamento_Contas_CS/FeatureServer"
+EVENT_CAT_LABEL = {0: "Campanha", 1: "Recorrência", 2: "Apoio", 3: "Contato/tentativa"}
+EVENT_STATUS_LABEL = {-1: "", 0: "sem resposta", 1: "reagendado", 2: "efetivado"}
 
 
 # ============================================================================
-# 1) Conexão — REST puro (requests), sem a ArcGIS Maps SDK for JavaScript
+# estado / carga
 # ============================================================================
-class ArcGISError(RuntimeError):
-    pass
+def _init_state():
+    for k, v in dict(loaded=False, acc=None, series=None, events=None, ref_date=None, today=None,
+                      analista="", err=None, err_trace=None, missing=None).items():
+        st.session_state.setdefault(k, v)
 
 
-def generate_token(username: str, password: str, portal: str = "https://www.arcgis.com", expiration_min: int = 60) -> str:
-    """Gera um token a partir de usuário/senha (alternativa à API key).
-    Depende da organização aceitar geração de token por referer — se falhar,
-    a API key costuma ser o caminho mais confiável para consultas de leitura."""
-    r = requests.post(
-        f"{portal.rstrip('/')}/sharing/rest/generateToken",
-        data={
-            "username": username, "password": password, "f": "json",
-            "referer": "https://streamlit.app", "expiration": expiration_min,
-        },
-        timeout=20,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if "token" not in data:
-        msg = (data.get("error") or {}).get("message", "Falha ao gerar token.")
-        raise ArcGISError(msg)
-    return data["token"]
-
-
-def _query(base_url: str, layer_id: int, where: str, token: str | None, out_fields: str = "*") -> pd.DataFrame:
-    url = f"{base_url.rstrip('/')}/{layer_id}/query"
-    rows: list[dict] = []
-    offset, page = 0, 1000
-    while True:
-        params = {
-            "where": where, "outFields": out_fields, "f": "json",
-            "returnGeometry": "false", "resultRecordCount": page, "resultOffset": offset,
-        }
-        if token:
-            params["token"] = token
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if "error" in data:
-            msg = data["error"].get("message", str(data["error"]))
-            details = data["error"].get("details")
-            if details:
-                msg += " — " + "; ".join(details)
-            raise ArcGISError(msg)
-        feats = data.get("features", [])
-        rows.extend(f["attributes"] for f in feats)
-        # alguns serviços limitam o retorno ao próprio maxRecordCount (ex.: 100 ou 200),
-        # mesmo pedindo mais — nesse caso a página vem menor que o pedido só por isso,
-        # não porque acabaram os registros. exceededTransferLimit avisa quando é o caso;
-        # avançar pelo nº real recebido (em vez do tamanho pedido) evita pular registros.
-        if not feats:
-            break
-        exceeded = bool(data.get("exceededTransferLimit"))
-        if not exceeded and len(feats) < page:
-            break
-        offset += len(feats)
-        if offset > 60000:  # trava de segurança
-            break
-    return pd.DataFrame(rows)
-
-
-def query_layer(base_url: str, layer_id: int, token: str | None = None, where: str = "1=1", out_fields: str = "*") -> pd.DataFrame:
-    return _query(base_url, layer_id, where, token, out_fields)
-
-
-_FIELD_TYPE_CACHE: dict[tuple, str | None] = {}
-_STRING_FIELD_TYPES = {"esriFieldTypeString", "esriFieldTypeGUID", "esriFieldTypeGlobalID"}
-
-
-def _field_type(base_url: str, layer_id: int, field_name: str, token: str | None = None) -> str | None:
-    """Tipo real do campo, lido do schema da camada (não do que o Python achou que
-    era ao ler outra camada). Evita adivinhar número vs texto — dois campos com o
-    mesmo nome em camadas diferentes podem ter tipos diferentes num serviço."""
-    key = (base_url, layer_id, field_name.lower())
-    if key in _FIELD_TYPE_CACHE:
-        return _FIELD_TYPE_CACHE[key]
-    ftype = None
+def _load(base_url, analista, token):
+    prog = st.empty()
     try:
-        params = {"f": "json"}
-        if token:
-            params["token"] = token
-        r = requests.get(f"{base_url.rstrip('/')}/{layer_id}", params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        for f in data.get("fields", []):
-            if str(f.get("name", "")).lower() == field_name.lower():
-                ftype = f.get("type")
-                break
-    except Exception:
-        ftype = None  # não deu pra ler o schema — quem chamou cai pro palpite anterior
-    _FIELD_TYPE_CACHE[key] = ftype
-    return ftype
+        contas, contato, enduser, evento, consumo = load_portfolio_raw(
+            base_url, analista, token, progress_cb=lambda m: prog.info(m)
+        )
+        if contas.empty:
+            prog.empty()
+            st.session_state.err = f'Nenhuma conta encontrada para "{analista}" no campo ANALISTA_CS. Confira a grafia usada no cadastro (nome completo, acentos etc.).'
+            st.session_state.loaded = False
+            return
+        prog.info("Processando…")
+        acc, series, events, ref_date, today, missing = build_portfolio(contas, contato, enduser, evento, consumo)
+        prog.empty()
+        st.session_state.update(loaded=True, acc=acc, series=series, events=events,
+                                 ref_date=ref_date, today=today, analista=analista, err=None,
+                                 err_trace=None, missing=missing)
+    except ArcGISError as e:
+        prog.empty()
+        st.session_state.err = f"Erro do ArcGIS: {e}"
+        st.session_state.err_trace = None
+        st.session_state.loaded = False
+    except Exception as e:  # noqa: BLE001
+        prog.empty()
+        hint = ""
+        msg = str(e)
+        if any(k in msg.lower() for k in ("token", "999", "498", "499", "403")):
+            hint = " Parece exigir login — preencha a API key (ou usuário/senha) na barra lateral."
+        st.session_state.err = f"Falha ao carregar: {msg}.{hint}"
+        st.session_state.err_trace = traceback.format_exc()
+        st.session_state.loaded = False
 
 
-def query_by_ids(base_url: str, layer_id: int, id_field: str, ids, token: str | None = None, chunk_size: int = 200, out_fields: str = "*") -> pd.DataFrame:
-    ids = [i for i in ids if i is not None]
-    if not ids:
-        return pd.DataFrame()
+# ============================================================================
+# barra lateral — conexão
+# ============================================================================
+def sidebar():
+    st.sidebar.header("Conexão")
+    base_url = st.sidebar.text_input("URL do Feature Service", value=DEFAULT_URL)
+    analista = st.sidebar.text_input("Analista CS (filtro obrigatório)", value=st.session_state.get("analista", ""),
+                                      placeholder="ex.: Ariane")
+    st.sidebar.caption("Base compartilhada entre analistas — só carrega/mostra contas cujo campo ANALISTA_CS bate com o valor acima (sem diferenciar maiúsculas/acentos exatos, mas confira a grafia se vier vazio).")
 
-    ftype = _field_type(base_url, layer_id, id_field, token)
-    if ftype is not None:
-        is_num = ftype not in _STRING_FIELD_TYPES
-    else:
-        # não conseguiu ler o schema desta camada — usa o tipo dos IDs como vieram
-        # de CONTAS_0 (comportamento anterior, só como último recurso)
-        is_num = isinstance(ids[0], (int, float, np.integer, np.floating)) and not isinstance(ids[0], bool)
+    auth_mode = st.sidebar.radio("Autenticação", ["Sem login (serviço público)", "API key", "Usuário e senha"], index=1)
+    token = None
+    username = password = None
+    if auth_mode == "API key":
+        token = st.sidebar.text_input("API key", type="password",
+                                       help="Gere em arcgis.com → Configurações da organização → API keys.")
+    elif auth_mode == "Usuário e senha":
+        username = st.sidebar.text_input("Usuário ArcGIS")
+        password = st.sidebar.text_input("Senha", type="password")
+        st.sidebar.caption("Gera um token via generateToken da organização. Depende da configuração de referer/token da sua org — se falhar, prefira API key.")
 
-    frames = []
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i + chunk_size]
-        if is_num:
-            vals = ",".join(str(int(float(v))) for v in chunk)
+    run = st.sidebar.button("Carregar carteira", type="primary", use_container_width=True)
+
+    if run:
+        if not analista.strip():
+            st.session_state.err = 'Preencha o campo "Analista CS" antes de carregar.'
+            st.session_state.loaded = False
         else:
-            vals = ",".join("'" + str(v).replace("'", "''") + "'" for v in chunk)
-        where = f"{id_field} IN ({vals})"
-        frames.append(_query(base_url, layer_id, where, token, out_fields))
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            tok = token
+            if auth_mode == "Usuário e senha" and username and password:
+                try:
+                    tok = generate_token(username, password)
+                except ArcGISError as e:
+                    st.session_state.err = f"Não consegui gerar o token: {e}"
+                    st.session_state.loaded = False
+                    tok = "__FAIL__"
+            if tok != "__FAIL__":
+                _load(base_url, analista.strip(), tok)
+
+    if st.session_state.get("err"):
+        st.sidebar.error(st.session_state.err)
+        if st.session_state.get("err_trace"):
+            with st.sidebar.expander("Detalhe técnico (pra depuração)"):
+                st.code(st.session_state.err_trace)
+    if st.session_state.get("loaded"):
+        st.sidebar.success(f"{len(st.session_state.acc)} contas carregadas de {st.session_state.analista}")
+        if st.session_state.get("missing"):
+            st.sidebar.warning("Campos não encontrados no serviço (tratados como vazios):\n" + "\n".join(
+                f"- {layer}: {', '.join(cols)}" for layer, cols in st.session_state.missing.items()
+            ))
 
 
-def load_portfolio_raw(base_url: str, analista: str, token: str | None = None, progress_cb=None):
-    """Carrega as 5 camadas já filtradas por ANALISTA_CS (via CONTAS_0) e
-    por IDCONTA (nas demais). progress_cb(str) é chamado a cada etapa, se dado."""
-    def note(msg):
-        if progress_cb:
-            progress_cb(msg)
-
-    note("Consultando CONTAS_0…")
-    analista_esc = analista.replace("'", "''")
-    contas = query_layer(base_url, LAYER_IDS["contas"], token, where=f"UPPER(ANALISTA_CS) = UPPER('{analista_esc}')")
-    if contas.empty:
-        return contas, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    if "IDCONTA" not in contas.columns:
-        cols_found = ", ".join(contas.columns) if len(contas.columns) else "(nenhum campo)"
-        raise ArcGISError(
-            f"CONTAS_0 devolveu {len(contas)} registro(s) para \"{analista}\", mas nenhum tem o campo "
-            f"'IDCONTA' — não dá pra continuar sem ele (é a chave usada pra juntar as outras 4 camadas). "
-            f"Campos encontrados nesse retorno: {cols_found}. Confira o nome exato do campo de ID no serviço."
+# ============================================================================
+# filtros
+# ============================================================================
+def filters_ui(acc: pd.DataFrame):
+    st.markdown("#### Filtros")
+    c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1.1])
+    with c1:
+        tiers_sel = st.multiselect(
+            "Prioridade", options=list(TIER_LABEL.keys()),
+            format_func=lambda t: TIER_LABEL[t],
+            default=[t for t in TIER_LABEL if t != 7],
+        )
+    with c2:
+        vert_sel = st.selectbox("Vertical", ["Todas"] + sorted(acc["VERTICAL"].dropna().unique().tolist()))
+    with c3:
+        parc_vals = sorted(acc["PARCEIRO"].fillna("(sem parceiro)").unique().tolist())
+        parc_sel = st.selectbox("Parceiro", ["Todos"] + parc_vals)
+    with c4:
+        mod_vals = sorted(acc["MODALIDADE_ATENDIMENTO"].dropna().unique().tolist())
+        mod_sel = st.multiselect(
+            "Modalidade", options=mod_vals, default=mod_vals,
+            format_func=lambda m: MODALIDADE_LABEL.get(int(m), str(m)),
         )
 
-    ids = [i for i in contas["IDCONTA"].tolist() if i is not None]
-    if not ids:
-        return contas.iloc[0:0], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    note(f"{len(contas)} contas encontradas — carregando CONTATO_1…")
-    contato = query_by_ids(base_url, LAYER_IDS["contato"], "IDCONTA", ids, token)
-    note("Carregando ENDUSER_2…")
-    enduser = query_by_ids(base_url, LAYER_IDS["enduser"], "IDCONTA", ids, token)
-    note("Carregando EVENTO_3…")
-    evento = query_by_ids(base_url, LAYER_IDS["evento"], "IDCONTA", ids, token)
-    note("Carregando CONSUMO_AGOL_6…")
-    consumo = query_by_ids(base_url, LAYER_IDS["consumo"], "IDCONTA", ids, token)
-    return contas, contato, enduser, evento, consumo
-
-
-def esri_dt(series) -> pd.Series:
-    """Datas do REST do ArcGIS vêm como epoch ms (UTC) quando f=json; mas
-    alguns serviços devolvem string ISO — trata os dois casos."""
-    s = pd.Series(series)
-    if s.empty:
-        return pd.to_datetime(s)
-    if pd.api.types.is_numeric_dtype(s):
-        return pd.to_datetime(s, unit="ms", utc=True).dt.tz_localize(None)
-    return pd.to_datetime(s, errors="coerce", utc=True).dt.tz_localize(None)
-
-
-# ============================================================================
-# 2) ETL — a mesma junção/agregação por IDCONTA do relatório original
-#    (feat.py), portada para rodar sobre dados carregados ao vivo.
-# ============================================================================
-CAMP_KW = ["convite", "email sobre", "email com grava", "material sobre novidades", "envio do convite",
-           "aviso labor", "descontinua", "evento esri", "geobim", "envio de material sobre ia",
-           "como levar gis", "laborat"]
-INTERNAL_RE = r"^(?:recebid|repasse|removido|atribui|contexto|alinhamento|informa)"
-APOIO_KW = ["apoio", "duvida", "dúvida", "chamado", "erro"]
-
-
-def _classify_events(evento: pd.DataFrame) -> pd.DataFrame:
-    ev = evento.copy()
-    if ev.empty:
-        return ev
-    ev["DATA"] = esri_dt(ev.get("DATA"))
-    ev = ev.dropna(subset=["DATA"]).copy()
-    ev["res"] = ev.get("RESUMO", "").fillna("").astype(str).str.lower().str.strip()
-    ev["campaign"] = (ev.get("FORMATO") == 7) | ev["res"].apply(lambda s: any(k in s for k in CAMP_KW))
-    ev["internal"] = (
-        (ev.get("FORMATO") == 5) | ev.get("TIPO", pd.Series(dtype=object)).isin([2, 3, 4])
-        | ev["res"].str.contains(INTERNAL_RE, regex=True) | ev["res"].str.contains("contexto da conta")
-    ) & ~ev["campaign"]
-    ev["touch"] = (~ev["campaign"]) & (~ev["internal"])
-    ev["rec"] = ev["res"].str.startswith("recorr")
-    ev["attempt"] = ev["res"].str.contains("tentativa")
-
-    def _cat(row):
-        if row["campaign"]:
-            return 0
-        if row["internal"]:
-            return 4
-        if row["rec"]:
-            return 1
-        if row.get("FORMATO") == 3 or any(k in row["res"] for k in APOIO_KW):
-            return 2
-        return 3
-
-    ev["cat"] = ev.apply(_cat, axis=1)
-    ev["ym"] = (ev["DATA"].dt.year - 2025) * 12 + (ev["DATA"].dt.month - 1)
-    return ev
-
-
-def _event_stats(ev: pd.DataFrame, today: pd.Timestamp) -> dict:
-    """id -> {touch_eff, eff_90, touch_noresp, rec_n, ev_campaign, days_since_eff, monthly(df), evl(list)}"""
-    out: dict[int, dict] = {}
-    if ev.empty:
-        return out
-    for idc, g in ev.groupby("IDCONTA"):
-        g = g.sort_values("DATA")
-        eff = g[(g["touch"]) & (g["STATUS"] == 2) & (~g["attempt"])]
-        noresp = g[(g["touch"]) & (g["STATUS"] == 0)]
-        last_eff = eff["DATA"].max() if len(eff) else pd.NaT
-        gm = g[g["cat"] != 4]
-        monthly = gm.groupby(["ym", "cat"]).size().unstack(fill_value=0)
-        for c in range(4):
-            if c not in monthly.columns:
-                monthly[c] = 0
-        monthly = monthly[[0, 1, 2, 3]].sort_index()
-        evl = gm.tail(14)[["DATA", "cat", "STATUS", "RESUMO"]].copy()
-        out[idc] = dict(
-            touch_eff=len(eff),
-            eff_90=int((eff["DATA"] >= today - pd.Timedelta(days=90)).sum()),
-            touch_noresp=len(noresp),
-            rec_n=int(g["rec"].sum()),
-            ev_campaign=int(g["campaign"].sum()),
-            days_since_eff=None if pd.isna(last_eff) else int((today - last_eff).days),
-            monthly=monthly,
-            evl=evl,
+    c5, c6, c7, c8 = st.columns([1.1, 0.8, 1.2, 1.5])
+    with c5:
+        est_vals = sorted(acc["ESTRATEGIA_CS"].dropna().unique().tolist())
+        est_sel = st.multiselect(
+            "Estratégia CS", options=est_vals, default=est_vals,
+            format_func=lambda e: ESTRATEGIA_CS_LABEL.get(int(e), str(e)),
         )
-    return out
+    with c6:
+        agol_vals = sorted(acc["AGOL"].dropna().unique().tolist())
+        agol_sel = st.multiselect(
+            "AGOL", options=agol_vals, default=agol_vals,
+            format_func=lambda a: AGOL_LABEL.get(int(a), str(a)),
+        )
+    with c7:
+        risco_sel = st.multiselect("Classificação de risco", options=RISCO_ORDER, default=RISCO_ORDER)
+    with c8:
+        q = st.text_input("Buscar conta", "")
 
-
-F_COLS = ["IDCONTA", "co_stale_days", "tot_cred", "perc", "n_org", "ini", "fim", "elapsed",
-          "days_to_end", "users", "act", "login", "login_days", "first_snap", "n_snap",
-          "vel60", "vel_prev", "act_d90", "act_d180"]
-
-
-def _consumo_stats(consumo: pd.DataFrame, today: pd.Timestamp):
-    """Réplica de feat.py: dedup por (conta,org,dia); agrega orgs por dia;
-    calcula consumo entre snapshots do mesmo contrato; retorna (F, series_map, ref_date).
-    F sempre tem todas as colunas de F_COLS (mesmo vazia), pra merge() e o resto do
-    pipeline nunca quebrarem por coluna ausente quando não há dado de consumo."""
-    co = consumo.copy()
-    empty_F = _ensure_columns(pd.DataFrame(columns=["IDCONTA"]), F_COLS)
-    if co.empty:
-        return empty_F, {}, None
-
-    for col in ("DATA", "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"):
-        if col in co.columns:
-            co[col] = esri_dt(co[col])
-    co = co.dropna(subset=["DATA"]).copy()
-    if co.empty:
-        return empty_F, {}, None
-
-    co["D"] = co["DATA"].dt.normalize()
-    co = co.sort_values(["IDCONTA", "ENDUSER", "D"]).drop_duplicates(["IDCONTA", "ENDUSER", "D"], keep="last")
-
-    def agg(g):
-        tc = g["TOTAL_CREDITOS"].sum()
-        cr = g["CREDITOS"].sum()
-        return pd.Series({
-            "tot": tc, "cred": cr, "perc": (100 * (1 - cr / tc) if tc > 0 else 0),
-            "users": g["TOTAL_USER"].sum(), "act": g["TOTAL_ATIVADO"].sum(),
-            "login": g["LAST_LOGIN"].max(), "ini": g["DATA_INICIO"].max(), "fim": g["DATA_FIM"].min(),
-            "n_org": g["ENDUSER"].nunique(),
-        })
-
-    ag = co.groupby(["IDCONTA", "D"]).apply(agg).reset_index()
-
-    co["dcred"] = co.groupby(["IDCONTA", "ENDUSER"])["CREDITOS"].diff()
-    co["dini"] = co.groupby(["IDCONTA", "ENDUSER"])["DATA_INICIO"].diff().dt.days.fillna(0)
-    co["cons"] = np.where((co["dcred"] < 0) & (co["dini"] == 0), -co["dcred"], 0.0)
-    cons_day = co.groupby(["IDCONTA", "D"])["cons"].sum().rename("cons").reset_index()
-    ag = ag.merge(cons_day, on=["IDCONTA", "D"], how="left")
-    ag["cons"] = ag["cons"].fillna(0.0)
-
-    ref_date = ag["D"].max()
-
-    rows, series_map = [], {}
-    for idc, g in ag.groupby("IDCONTA"):
-        g = g.sort_values("D")
-        last = g.iloc[-1]
-        d = {"IDCONTA": idc}
-        d["co_stale_days"] = (ref_date - last["D"]).days
-        d["tot_cred"] = last["tot"]; d["perc"] = last["perc"]; d["n_org"] = last["n_org"]
-        d["ini"] = last["ini"]; d["fim"] = last["fim"]
-        span = (last["fim"] - last["ini"]).days if pd.notna(last["fim"]) and pd.notna(last["ini"]) else None
-        d["elapsed"] = (last["D"] - last["ini"]).days / span * 100 if span and span > 0 else np.nan
-        d["days_to_end"] = (last["fim"] - today).days if pd.notna(last["fim"]) else np.nan
-        d["users"] = last["users"]; d["act"] = last["act"]
-        d["login"] = last["login"]
-        d["login_days"] = (last["D"] - last["login"]).days if pd.notna(last["login"]) else np.nan
-        d["first_snap"] = g["D"].min(); d["n_snap"] = len(g)
-
-        for lab, (lo, hi) in {"vel60": (0, 60), "vel_prev": (60, 150)}.items():
-            w = g[(g["D"] > last["D"] - pd.Timedelta(days=hi)) & (g["D"] <= last["D"] - pd.Timedelta(days=lo))]
-            span_d = (w["D"].max() - w["D"].min()).days if len(w) > 1 else 0
-            d[lab] = (w["cons"].iloc[1:].sum() / max(w["tot"].mean(), 1) * 100 / span_d * 30) if span_d >= 20 and w["tot"].mean() > 0 else np.nan
-
-        for k in (90, 180):
-            b_ = g[g["D"] <= last["D"] - pd.Timedelta(days=k)]
-            if len(b_):
-                d[f"act_d{k}"] = last["act"] - b_.iloc[-1]["act"]
-            else:
-                d[f"act_d{k}"] = np.nan
-
-        rows.append(d)
-        series_map[idc] = g[["D", "perc", "act", "users", "login", "tot"]].assign(
-            login_days=lambda x: (x["D"] - x["login"]).dt.days
-        )[["D", "perc", "act", "users", "login_days", "tot"]].values.tolist()
-
-    return pd.DataFrame(rows), series_map, ref_date
+    f = acc[acc["t"].isin(tiers_sel)]
+    if vert_sel != "Todas":
+        f = f[f["VERTICAL"] == vert_sel]
+    if parc_sel != "Todos":
+        f = f[f["PARCEIRO"].fillna("(sem parceiro)") == parc_sel]
+    f = f[f["MODALIDADE_ATENDIMENTO"].isin(mod_sel)]
+    f = f[f["ESTRATEGIA_CS"].isin(est_sel)]
+    f = f[f["AGOL"].isin(agol_sel)]
+    # contas fora da régua (ex.: sem dado de consumo) não têm peso_risco — deixa
+    # passar sempre, o filtro só restringe quem TEM classificação
+    f = f[f["peso_risco"].isna() | f["peso_risco"].isin(risco_sel)]
+    if q.strip():
+        ql = q.strip().lower()
+        f = f[f["NOME_CONTA"].str.lower().str.contains(ql, na=False) | f["VERTICAL"].str.lower().str.contains(ql, na=False)]
+    return f
 
 
 # ============================================================================
-# classificação de risco por pontuação ponderada
-# (réplica linha-a-linha da regra Arcade que já roda na camada calculada do
-# ArcGIS — mesmos pesos, mesmos limiares, mesma ordem de avaliação. Diferente
-# do Arcade original, contas sem AGOL não são excluídas daqui — elas entram
-# na régua normalmente (tendem a pontuar baixo por falta de dado de consumo);
-# quem quiser tirá-las da visão usa o filtro "AGOL" na tela inicial.)
+# KPIs
 # ============================================================================
-def _ultimo_consumo(consumo: pd.DataFrame) -> pd.DataFrame:
-    """Uma linha por conta: o snapshot de consumo mais recente (sem agregar por
-    ENDUSER — pega a linha mais nova de qualquer organização, igual à regra Arcade,
-    que não soma orgs como o resto do pipeline faz)."""
-    co = consumo.copy()
-    if co.empty:
-        return pd.DataFrame(columns=["IDCONTA"])
-    for col in ("DATA", "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"):
-        if col in co.columns:
-            co[col] = esri_dt(co[col])
-    co = co.dropna(subset=["DATA"])
-    if co.empty:
-        return pd.DataFrame(columns=["IDCONTA"])
-    co = co.sort_values("DATA")
-    return co.groupby("IDCONTA", as_index=False).last()
+def kpis(F: pd.DataFrame, acc_total: int):
+    sc = F[F["t"] != 7]
+    f12 = int(F["t"].isin([1, 2]).sum())
+    ren = int((sc["days_to_end"] <= 60).sum())
+    sem = int((sc["eff_90"] == 0).sum())
+    act = sc.loc[sc["hasUse"], "act"].sum()
+    us = sc.loc[sc["hasUse"], "users"].sum()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Contas na seleção", len(F), f"{acc_total} na base")
+    c2.metric("Foco imediato/semana", f12, "prioridades 1 e 2")
+    c3.metric("Vencidos/vencendo em 60d", ren)
+    c4.metric("Sem contato efetivo em 90d", f"{100*sem/len(sc):.0f}%" if len(sc) else "—", f"{sem} de {len(sc)}")
+    c5.metric("Ativados / cadastrados", f"{100*act/us:.0f}%" if us else "—", f"{int(act)} de {int(us)}")
 
 
-def _eventos_100d(evento: pd.DataFrame, today: pd.Timestamp) -> pd.DataFrame:
-    """Contagem de eventos por conta e FORMATO (1,2,3,4,6,7,8), só últimos 100 dias."""
-    cols = ["IDCONTA"] + [f"ev{i}" for i in (1, 2, 3, 4, 6, 7, 8)]
-    ev = evento.copy()
-    if ev.empty:
-        return pd.DataFrame(columns=cols)
-    ev["DATA"] = esri_dt(ev.get("DATA"))
-    ev = ev.dropna(subset=["DATA", "IDCONTA", "FORMATO"])
-    ev = ev[ev["DATA"] >= today - pd.Timedelta(days=100)]
-    if ev.empty:
-        return pd.DataFrame(columns=cols)
-    piv = ev.pivot_table(index="IDCONTA", columns="FORMATO", values="DATA", aggfunc="count", fill_value=0)
-    for f in (1, 2, 3, 4, 6, 7, 8):
-        if f not in piv.columns:
-            piv[f] = 0
-    piv = piv[[1, 2, 3, 4, 6, 7, 8]]
-    piv.columns = [f"ev{int(c)}" for c in piv.columns]
-    return piv.reset_index()
+# ============================================================================
+# gráficos
+# ============================================================================
+def chart_tiers(acc_scope: pd.DataFrame, key_prefix: str = "tiers"):
+    counts = acc_scope["t"].value_counts().reindex(TIER_LABEL.keys(), fill_value=0)
+    fig = go.Figure(go.Bar(
+        x=counts.values, y=[TIER_LABEL[t] for t in counts.index], orientation="h",
+        marker_color=[TIER_COLOR[t] for t in counts.index],
+        text=counts.values, textposition="outside", hovertemplate="%{y}: %{x} contas<extra></extra>",
+    ))
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"),
+                       xaxis_title=None, showlegend=False, plot_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def _first_true(pairs, default=0):
-    """Réplica do When() do Arcade: primeira condição verdadeira vence; senão, default."""
-    for cond, val in pairs:
-        if cond:
-            return val
-    return default
+def chart_scatter(F: pd.DataFrame, key_prefix: str = "scatter"):
+    pts = F[F["hasUse"] & (F["tot_cred"] > 0) & F["perc"].notna() & F["elapsed"].notna()]
+    if pts.empty:
+        st.info("Sem contas com pacote e consumo AGOL para a seleção.")
+        return
+    fig = go.Figure()
+    fig.add_shape(type="line", x0=0, y0=0, x1=110, y1=110, line=dict(color="#cfd5de", dash="dash"))
+    for t in sorted(pts["t"].unique()):
+        g = pts[pts["t"] == t]
+        fig.add_trace(go.Scatter(
+            x=g["elapsed"].clip(upper=110), y=g["perc"].clip(upper=110), mode="markers",
+            name=TIER_LABEL[t], marker=dict(color=TIER_COLOR[t], size=9, line=dict(color="white", width=1)),
+            text=g["NOME_CONTA"],
+            hovertemplate="<b>%{text}</b><br>Consumido: %{y:.0f}%<br>Prazo decorrido: %{x:.0f}%<extra></extra>",
+        ))
+    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+                       xaxis_title="% do prazo do contrato decorrido", yaxis_title="% créditos consumidos",
+                       xaxis_range=[0, 112], yaxis_range=[0, 112], plot_bgcolor="white",
+                       legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
+    st.caption(f"{len(pts)} contas com pacote e consumo AGOL; {len(F)-len(pts)} ficam de fora (só Enterprise ou sem pacote). Eixos limitados a 110%.")
 
 
-def _peso_consumo(modalidade, perc, dias_ini):
-    """dias_ini == 60 ou == 180 (exatamente no limite) entra na faixa de ritmo
-    mais rápido (o peso maior) — fecha a lacuna que a regra original (só > e <,
-    sem =) deixava nesses dois pontos exatos."""
-    if pd.isna(perc) or perc == 0:
-        return 0
-    gt = lambda x: pd.notna(dias_ini) and dias_ini > x
-    le = lambda x: pd.notna(dias_ini) and dias_ini <= x
-    if modalidade == 1:
-        return _first_true([
-            (0 < perc <= 10 and gt(60), 10), (0 < perc <= 10 and le(60), 12),
-            (10 < perc <= 50 and gt(180), 15), (10 < perc <= 50 and le(180), 20),
-            (perc > 50, 25),
-        ])
-    return _first_true([
-        (0 < perc <= 10 and gt(60), 7), (0 < perc <= 10 and le(60), 10),
-        (10 < perc <= 50 and gt(180), 12), (10 < perc <= 50 and le(180), 17),
-        (perc > 50, 20),
-    ])
+def chart_renew(F: pd.DataFrame, today: pd.Timestamp, key_prefix: str = "renew"):
+    rows = F[(F["t"] != 7) & F["days_to_end"].notna() & (F["days_to_end"] >= -90) & (F["days_to_end"] <= 90)]
+    rows = rows.sort_values("days_to_end")
+    if rows.empty:
+        st.info("Nenhum contrato nessa janela para a seleção.")
+        return
+    fig = go.Figure()
+    for t in sorted(rows["t"].unique()):
+        g = rows[rows["t"] == t]
+        fig.add_trace(go.Scatter(
+            x=g["days_to_end"], y=g["NOME_CONTA"], mode="markers", name=TIER_LABEL[t],
+            marker=dict(color=TIER_COLOR[t], size=11, line=dict(color="white", width=1)),
+            hovertemplate="<b>%{y}</b><br>%{x} dias<extra></extra>",
+        ))
+    fig.add_vline(x=0, line_dash="dash", line_color="#78828f")
+    fig.update_layout(height=max(240, 26 * len(rows)), margin=dict(l=10, r=10, t=10, b=10),
+                       xaxis_title="dias até o fim do contrato (negativo = já venceu)",
+                       yaxis=dict(autorange="reversed"), plot_bgcolor="white", legend=dict(orientation="h", y=-0.15))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def _peso_ativacao(modalidade, perc_at):
-    if pd.isna(perc_at) or perc_at == 0:
-        return 0
-    if modalidade == 1:
-        return _first_true([(0 < perc_at < 50, 5), (perc_at == 50, 7), (50 < perc_at <= 80, 10), (perc_at > 80, 15)])
-    return _first_true([(0 < perc_at < 50, 3), (perc_at == 50, 5), (50 < perc_at <= 80, 7), (perc_at > 80, 10)])
+def chart_adoption(F: pd.DataFrame, series: dict, key_prefix: str = "adoption"):
+    sc = F[(F["t"] != 7)]
+    months: dict[int, dict] = {}
+    for idc in sc["IDCONTA"]:
+        s = series.get(idc)
+        if not s:
+            continue
+        last_per_month = {}
+        for row in s:
+            d0, perc, act, users, login_days, tot = row
+            ym = (d0.year - 2025) * 12 + (d0.month - 1)
+            last_per_month[ym] = (act, users)
+        for ym, (act, users) in last_per_month.items():
+            o = months.setdefault(ym, {"act": 0, "us": 0})
+            o["act"] += act or 0
+            o["us"] += users or 0
+    if not months:
+        st.info("Sem série de consumo para a seleção.")
+        return
+    ks = sorted(months.keys())
+    labels = [f"{2025 + k//12}-{(k%12)+1:02d}" for k in ks]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=labels, y=[months[k]["act"] for k in ks], mode="lines+markers",
+                              name="Ativados", line=dict(color="#2a78d6", width=2)))
+    fig.add_trace(go.Scatter(x=labels, y=[months[k]["us"] for k in ks], mode="lines+markers",
+                              name="Cadastrados", line=dict(color="#eb6834", width=2)))
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
+                       legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
 
-def _peso_login(modalidade, dias_login):
-    if pd.isna(dias_login):
-        return 0
-    if modalidade == 1:
-        return _first_true([
-            (30 < dias_login <= 60, 10), (15 < dias_login <= 30, 15),
-            (5 < dias_login <= 15, 20), (1 < dias_login <= 5, 25), (dias_login <= 1, 30),
-        ])
-    return _first_true([
-        (30 < dias_login <= 60, 5), (15 < dias_login <= 30, 10),
-        (5 < dias_login <= 15, 12), (1 < dias_login <= 5, 16), (dias_login <= 1, 20),
-    ])
+def chart_events(F: pd.DataFrame, monthly_map: dict, key_prefix: str = "events"):
+    ids = F.loc[F["t"] != 7, "IDCONTA"]
+    combined = None
+    for idc in ids:
+        m = monthly_map.get(idc)
+        if m is None or m.empty:
+            continue
+        combined = m if combined is None else combined.add(m, fill_value=0)
+    if combined is None or combined.empty:
+        st.info("Sem eventos para a seleção.")
+        return
+    combined = combined.sort_index().tail(9)
+    labels = [f"{2025 + int(k)//12}-{(int(k)%12)+1:02d}" for k in combined.index]
+    fig = go.Figure()
+    cat_order = [0, 1, 2, 3]  # campanha, recorrência, apoio, outro
+    names = {0: "Campanha", 1: "Recorrência", 2: "Apoio", 3: "Contato/tentativa"}
+    colors = {0: EVENT_COLOR["Campanha"], 1: EVENT_COLOR["Recorrência"], 2: EVENT_COLOR["Apoio"], 3: EVENT_COLOR["Contato/tentativa"]}
+    for c in cat_order:
+        if c not in combined.columns:
+            continue
+        fig.add_trace(go.Bar(x=labels, y=combined[c].values, name=names[c], marker_color=colors[c]))
+    fig.update_layout(barmode="stack", height=280, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
+                       legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
+    st.caption("Campanhas em massa não são interação individual com o cliente.")
 
 
-def _peso_maturidade(modalidade, mat):
-    if pd.isna(mat) or mat == 4:
-        return 0
-    if modalidade == 1:
-        return _first_true([(mat == 1, 5), (mat == 2, 8), (mat == 3, 10)])
-    return _first_true([(mat == 1, 10), (mat == 2, 15), (mat == 3, 20)])
+def quality_panel(F: pd.DataFrame):
+    sc = F[F["t"] != 7]
+    n = max(len(sc), 1)
+    rows = [
+        ("Engajamento e maturidade = 4 (parece \"não avaliado\")", ((sc["ENGAJAMENTO"] == 4) & (sc["MATURIDADE"] == 4)).sum() / n),
+        ("Sem dado de uso (Enterprise sem AGOL, ou fora da base de consumo)", (~sc["hasUse"]).sum() / n),
+        ("Com 0 ou 1 contato cadastrado", (sc["n_contatos"] <= 1).sum() / n),
+    ]
+    for label, pct in rows:
+        st.caption(f"{label} — **{pct*100:.0f}%**")
+        st.progress(min(1.0, pct))
 
 
-def _peso_contato(modalidade, um_um, um_muitos):
-    base_uu = 0 if pd.isna(um_um) else um_um
-    base_um = 0 if pd.isna(um_muitos) else um_muitos
-    div = {4: 3, 3: 2, 2: 1, 1: 1}.get(modalidade, 1)
-    v_uu, v_um = base_uu / div, base_um / div
-    if modalidade in (3, 4):
-        return _first_true([
-            (v_uu >= 1 and v_um >= 1, 20),
-            (0.5 <= v_uu < 1 and 0.5 <= v_um < 1, 15),
-            (0 < v_uu < 0.5 and 0 < v_um < 1, 10),
-            (v_uu > 0 or v_um > 0, 5),
-            (v_uu == 0 and v_um == 0, 0),
-        ])
-    if modalidade == 2:
-        return _first_true([
-            (base_uu >= 1 and base_um >= 1, 20),
-            (base_uu == 0 and base_um == 0, 0),
-            (base_uu >= 1 or base_um >= 1, 10),
-        ])
-    if modalidade == 1:
-        return _first_true([(base_um > 1, 20), (base_uu > 0 and base_um > 0, 20), (base_um == 1, 10)])
-    return 0
+def vertical_table(F: pd.DataFrame, key_prefix: str = "vertical"):
+    sc = F[F["t"] != 7]
+    if sc.empty:
+        st.info("Sem contas para a seleção.")
+        return
+    g = sc.groupby("VERTICAL").agg(
+        contas=("IDCONTA", "size"),
+        login30=("login_days", lambda s: (s <= 30).sum()),
+        com_dado=("login_days", lambda s: s.notna().sum()),
+        perc_mediana=("perc", "median"),
+        efetivos_media=("eff_90", "mean"),
+        sem_contato=("eff_90", lambda s: (s == 0).sum()),
+    ).reset_index().sort_values("contas", ascending=False)
+    g["Login ≤30d"] = g.apply(lambda r: f"{int(r.login30)}/{int(r.com_dado)}" if r.com_dado else "—", axis=1)
+    g["% créditos (mediana)"] = g["perc_mediana"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "—")
+    g["Efetivos 90d (média)"] = g["efetivos_media"].round(1)
+    out = g[["VERTICAL", "contas", "Login ≤30d", "% créditos (mediana)", "Efetivos 90d (média)", "sem_contato"]]
+    out.columns = ["Vertical", "Contas", "Login ≤30d", "% créditos consumidos (mediana)", "Contatos efetivos 90d (média)", "Sem contato 90d"]
+    st.dataframe(out, use_container_width=True, hide_index=True, key=f"table_{key_prefix}")
 
 
-def _penalidade_status(modalidade, status):
-    if modalidade == 1:
-        return _first_true([(status == 3, 5), (status == 5, 35)])
-    return _first_true([(status == 1, 10), (status == 3, 30), (status == 4, 20), (status == 8, 20), (status == 5, 35)])
+# ============================================================================
+# tabela principal + detalhe
+# ============================================================================
+def accounts_table(F: pd.DataFrame, key_prefix: str = "accounts"):
+    show = F.copy()
+    show["Prioridade"] = show["t"].map(TIER_LABEL)
+    show["Créditos consumidos"] = show["perc"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "—")
+    show["Prazo decorrido"] = show["elapsed"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "—")
+    show["Fim do contrato (dias)"] = show["days_to_end"]
+    show["Último login (dias)"] = show["login_days"]
+    cols = ["NOME_CONTA", "Prioridade", "mot", "Fim do contrato (dias)", "Créditos consumidos", "Prazo decorrido",
+            "Último login (dias)", "eff_90"]
+    labels = ["Conta", "Prioridade", "Motivo principal", "Fim do contrato (d)", "Créditos consumidos",
+              "Prazo decorrido", "Último login (d)", "Efetivos 90d"]
+    tbl = show[cols].rename(columns=dict(zip(cols, labels))).sort_values("Prioridade")
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
 
 
-def _classifica_risco(total):
-    if pd.isna(total):
-        return None
-    if total <= 20:
-        return "Crítico"
-    if total <= 40:
-        return "Alto"
-    if total <= 60:
-        return "Médio"
-    return "Baixo"
+def account_detail(acc: pd.DataFrame, series: dict, events: dict, key_prefix: str = "detail"):
+    st.markdown("#### Detalhe da conta")
+    names = acc.sort_values("NOME_CONTA")["NOME_CONTA"].tolist()
+    if not names:
+        return
+    sel = st.selectbox("Escolha uma conta", names, key=f"select_{key_prefix}")
+    a = acc[acc["NOME_CONTA"] == sel].iloc[0]
 
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.markdown(f"**{a['NOME_CONTA']}** · {a.get('VERTICAL','')} · {a.get('SUBSETOR','') or ''}")
+        st.caption(f"Parceiro: {a.get('PARCEIRO') or '—'} · Exec. recorrência: {a.get('EXECUTIVO_RECORRENCIA') or '—'} · Exec. negócios: {a.get('EXECUTIVO_NEGOCIOS') or '—'}")
+        st.markdown(f":{'red' if a['t'] in (1,2,6) else 'orange' if a['t']==3 else 'blue' if a['t']==4 else 'green'}[**{TIER_LABEL[a['t']]}**]")
+        st.info(f"**Motivo principal:** {a['mot']}")
+        st.success(f"**Próxima ação sugerida:** {a['ac']}")
+    with c2:
+        st.metric("Créditos do pacote", f"{a['tot_cred']:.0f}" if pd.notna(a.get('tot_cred')) else "—")
+        st.metric("Consumido", f"{a['perc']:.0f}%" if pd.notna(a.get('perc')) else "—")
+        st.metric("Prazo decorrido", f"{a['elapsed']:.0f}%" if pd.notna(a.get('elapsed')) else "—")
+        st.metric("Último login (dias)", f"{a['login_days']:.0f}" if pd.notna(a.get('login_days')) else "—")
 
-def compute_risk_score(contas: pd.DataFrame, consumo: pd.DataFrame, evento: pd.DataFrame,
-                        today: pd.Timestamp) -> pd.DataFrame:
-    """Réplica da regra Arcade: uma linha por conta — todas entram, inclusive as
-    sem AGOL (o filtro "AGOL" na tela inicial é quem decide se elas aparecem) —
-    com cada peso, o total e a classificação final (peso_risco)."""
-    c = contas.copy()
-    if c.empty:
-        return pd.DataFrame(columns=["IDCONTA"])
+    s = series.get(a["IDCONTA"])
+    if s:
+        df = pd.DataFrame(s, columns=["data", "perc", "ativados", "cadastrados", "login_dias", "total"])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df["data"], y=df["perc"].clip(upper=120), mode="lines+markers",
+                                  name="% consumido", line=dict(color="#2a78d6", width=2), fill="tozeroy",
+                                  fillcolor="rgba(42,120,214,.12)"))
+        fig.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10), title="% do pacote consumido",
+                           plot_bgcolor="white", yaxis_range=[0, max(105, df['perc'].max()*1.05)])
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}_perc")
 
-    ult = _ultimo_consumo(consumo)
-    ev = _eventos_100d(evento, today)
-    a = c.merge(ult, on="IDCONTA", how="left", suffixes=("", "_cons")).merge(ev, on="IDCONTA", how="left")
-    for col in [f"ev{i}" for i in (1, 2, 3, 4, 6, 7, 8)]:
-        a[col] = a[col].fillna(0)
-
-    a["perc_ativado"] = np.where(a["TOTAL_USER"].fillna(0) > 0, 100 * a["TOTAL_ATIVADO"] / a["TOTAL_USER"], 0)
-    a["dias_desde_inicio"] = (today - a["DATA_INICIO"]).dt.days
-    a["dias_login"] = (today - a["LAST_LOGIN"]).dt.days
-    a["um_um"] = a["ev1"] + a["ev2"] + a["ev3"] + a["ev4"] + a["ev6"]
-    a["um_muitos"] = a["ev7"] + a["ev8"]
-
-    a["peso_p_cons"] = a.apply(lambda r: _peso_consumo(r["MODALIDADE_ATENDIMENTO"], r.get("PERC_CREDITOS"), r["dias_desde_inicio"]), axis=1)
-    a["peso_p_ativ"] = a.apply(lambda r: _peso_ativacao(r["MODALIDADE_ATENDIMENTO"], r["perc_ativado"]), axis=1)
-    a["peso_login"] = a.apply(lambda r: _peso_login(r["MODALIDADE_ATENDIMENTO"], r["dias_login"]), axis=1)
-    a["peso_maturidade"] = a.apply(lambda r: _peso_maturidade(r["MODALIDADE_ATENDIMENTO"], r["MATURIDADE"]), axis=1)
-    a["peso_contato"] = a.apply(lambda r: _peso_contato(r["MODALIDADE_ATENDIMENTO"], r["um_um"], r["um_muitos"]), axis=1)
-    a["peso_qtde_apps"] = a["QTDE_APPS"].fillna(0)
-    a["penalidade_status"] = a.apply(lambda r: _penalidade_status(r["MODALIDADE_ATENDIMENTO"], r["STATUS"]), axis=1)
-
-    a["peso_total"] = (a["peso_contato"] + a["peso_p_cons"] + a["peso_p_ativ"] + a["peso_maturidade"]
-                        + a["peso_login"] + a["peso_qtde_apps"] - a["penalidade_status"])
-    a["peso_risco"] = a["peso_total"].map(_classifica_risco)
-    a["nm_modalidade"] = a["MODALIDADE_ATENDIMENTO"].map(MODALIDADE_LABEL)
-
-    keep = ["IDCONTA", "peso_p_cons", "peso_p_ativ", "peso_login", "peso_maturidade", "peso_contato",
-            "peso_qtde_apps", "penalidade_status", "peso_total", "peso_risco", "nm_modalidade",
-            "perc_ativado", "dias_desde_inicio", "dias_login", "um_um", "um_muitos"]
-    return a[keep]
-
-
-def tier_of(r: pd.Series) -> int:
-    if r.get("ESTRATEGIA_ATENDIMENTO") == 2:
-        return 7
-    if pd.isna(r.get("tot_cred")):
-        return 3 if (r.get("eff_90") or 0) > 0 else 6
-    if pd.notna(r.get("co_stale_days")) and r["co_stale_days"] > 14:
-        return 6
-    perc, dte, el, lg = r.get("perc"), r.get("days_to_end"), r.get("elapsed"), r.get("login_days")
-    if (((pd.notna(perc) and perc >= 90 and pd.notna(dte) and dte > 45)
-         or (pd.notna(perc) and perc >= 80 and pd.notna(el) and el < 50))
-            and pd.notna(lg) and lg <= 30):
-        return 4
-    bad = (pd.notna(lg) and lg > 30) \
-        or (pd.notna(perc) and perc <= 2 and pd.notna(el) and el >= 50 and (r.get("tot_cred") or 0) >= 1000) \
-        or (pd.notna(dte) and dte <= 60)
-    if bad:
-        return 3
-    if (r.get("eff_90") or 0) == 0 and r.get("ESTRATEGIA_CS") == 1 and (r.get("n_snap") or 0) < 8:
-        return 6
-    return 5
-
-
-def motivo_of(r: pd.Series):
-    t = r["t"]
-    if t == 7:
-        return ("Perfil compatível com conta fora do escopo de atendimento (estratégia de atendimento = 2)",
-                "Confirmar com gestor se a conta sai da carteira")
-    if pd.isna(r.get("tot_cred")):
-        if t == 6:
-            return ("Sem dados de consumo AGOL (só Enterprise) e sem contato efetivo em 90 dias: não há evidência para afirmar saúde",
-                    "Tentar contato com o ponto de contato; obter dados de uso do Enterprise")
-        return (f"Adoção invisível (sem AGOL); relacionamento com {int(r.get('eff_90') or 0)} contato(s) efetivo(s) em 90 dias",
-                "Levantar uso do Enterprise com o cliente na próxima recorrência")
-    if t == 6:
-        stale = int(r["co_stale_days"]) if pd.notna(r.get("co_stale_days")) else "?"
-        return (f"Contrato vencido/sem snapshot há {stale} dias; sem contato efetivo em 90d",
-                "Confirmar com executivo se houve renovação ou churn")
-    if t == 4:
-        perc = r.get("perc"); el = r.get("elapsed")
-        return (f"Créditos {round(perc) if pd.notna(perc) else '?'}% consumidos com {round(el) if pd.notna(el) else '?'}% do prazo — consumo acima do ritmo do contrato",
-                "Avaliar ampliação de pacote antes de esgotar")
-    if t == 3:
-        parts = []
-        lg, perc, el, dte = r.get("login_days"), r.get("perc"), r.get("elapsed"), r.get("days_to_end")
-        if pd.notna(lg) and lg > 30:
-            parts.append(f"último login há {int(lg)} dias")
-        if pd.notna(perc) and perc <= 2 and pd.notna(el) and el >= 50:
-            parts.append(f"créditos praticamente sem uso ({perc:.1f}%) com {round(el)}% do prazo")
-        if pd.notna(dte) and dte <= 60:
-            parts.append(f"renovação em {int(dte)} dias")
-        s = "; ".join(parts) if parts else "Sinais de baixa atividade"
-        s = s[0].upper() + s[1:]
-        return (s, "Validar uso real com o cliente (créditos baixos podem refletir uso de Enterprise/apps)")
-    if (r.get("eff_90") or 0) == 0:
-        return ("Uso recente e consumo estável, contato do CS escasso (perfil autônomo)",
-                "Manter baixa intensidade; contato preventivo trimestral")
-    return ("Uso recente, consumo estável e contato efetivo recente", "Manter cadência atual")
-
-
-def build_portfolio(contas: pd.DataFrame, contato: pd.DataFrame, enduser: pd.DataFrame,
-                     evento: pd.DataFrame, consumo: pd.DataFrame):
-    """Retorna (acc_df, series_map, events_map, ref_date, today, missing_report) prontos pro painel.
-    missing_report lista, por camada, os campos esperados que não vieram do serviço
-    (o app não quebra por isso — só preenche como vazio — mas vale conferir os nomes)."""
-    today = pd.Timestamp.now().normalize()
-    missing = missing_fields_report(contas, contato, enduser, evento, consumo)
-    contas = _ensure_columns(contas, CONTAS_COLS)
-    contato = _ensure_columns(contato, CONTATO_COLS)
-    enduser = _ensure_columns(enduser, ENDUSER_COLS)
-    evento = _ensure_columns(evento, EVENTO_COLS)
-    consumo = _ensure_columns(consumo, CONSUMO_COLS)
-
-    if contas.empty:
-        return contas, {}, {}, None, today, missing
-
-    if len(contato):
-        n_contatos = contato.groupby("IDCONTA").size().rename("n_contatos")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=df["data"], y=df["ativados"], mode="lines+markers", name="Ativados",
+                                   line=dict(color="#2a78d6", width=2)))
+        fig2.add_trace(go.Scatter(x=df["data"], y=df["cadastrados"], mode="lines+markers", name="Cadastrados",
+                                   line=dict(color="#eb6834", width=2)))
+        fig2.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10), title="Usuários ativados e cadastrados",
+                            plot_bgcolor="white", legend=dict(orientation="h", y=-0.3))
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}_users")
     else:
-        # Series vazia, mas com o índice NOMEADO "IDCONTA" — sem isso, o merge()
-        # abaixo (on="IDCONTA") não acha a chave do lado direito e quebra com
-        # KeyError: 'IDCONTA'. Acontece quando nenhuma conta do analista tem
-        # registro em CONTATO_1 (ex.: carteira nova, ou colega sem contatos cadastrados).
-        n_contatos = pd.Series(dtype="int64", name="n_contatos", index=pd.Index([], name="IDCONTA"))
+        st.caption("Sem série de consumo AGOL para esta conta.")
 
-    ev = _classify_events(evento)
-    ev_stats = _event_stats(ev, today)
+    evl = events["evl"].get(a["IDCONTA"])
+    st.markdown("**Últimos eventos (sem campanhas)**")
+    if evl is not None and len(evl):
+        rows = evl.sort_values("DATA", ascending=False)
+        for _, r in rows.iterrows():
+            cat = EVENT_CAT_LABEL.get(r["cat"], "")
+            status = EVENT_STATUS_LABEL.get(r["STATUS"], "")
+            st.caption(f"{r['DATA'].strftime('%d/%m/%y')} · {cat}{' · ' + status if status else ''} — {r['RESUMO'] or '—'}")
+    else:
+        st.caption(f"Nenhum evento registrado além de campanhas ({int(a.get('ev_campaign') or 0)} campanhas recebidas).")
 
-    F, series_map, ref_date = _consumo_stats(consumo, today)
 
-    a = contas.merge(F, on="IDCONTA", how="left").merge(n_contatos, on="IDCONTA", how="left")
-    a["n_contatos"] = a["n_contatos"].fillna(0).astype(int)
-    a["hasUse"] = a["tot_cred"].notna()
+# ============================================================================
+# classificação de risco — pontuação ponderada (mesma régua do Arcade)
+# ============================================================================
+def risco_kpis(F: pd.DataFrame):
+    r = F[F["peso_risco"].notna()]
+    cols = st.columns(5)
+    cols[0].metric("Total de contas", len(F))
+    for col, label in zip(cols[1:], RISCO_ORDER):
+        col.metric(label, int((r["peso_risco"] == label).sum()))
 
-    for col, default in [("touch_eff", 0), ("eff_90", 0), ("touch_noresp", 0), ("rec_n", 0),
-                          ("ev_campaign", 0), ("days_since_eff", None)]:
-        a[col] = a["IDCONTA"].map(lambda i: ev_stats.get(i, {}).get(col, default))
 
-    a["t"] = a.apply(tier_of, axis=1)
-    mot_ac = a.apply(motivo_of, axis=1)
-    a["mot"] = mot_ac.apply(lambda x: x[0])
-    a["ac"] = mot_ac.apply(lambda x: x[1])
-    a["tier_label"] = a["t"].map(TIER_LABEL)
-    a["tier_color"] = a["t"].map(TIER_COLOR)
+def chart_risco_dist(F: pd.DataFrame, key_prefix: str = "risco_dist"):
+    r = F[F["peso_risco"].notna()]
+    if r.empty:
+        st.info("Nenhuma conta classificada na seleção.")
+        return
+    counts = r["peso_risco"].value_counts().reindex(RISCO_ORDER, fill_value=0)
+    fig = go.Figure(go.Bar(
+        x=counts.values, y=counts.index, orientation="h",
+        marker_color=[RISCO_COLOR[k] for k in counts.index],
+        text=counts.values, textposition="outside", hovertemplate="%{y}: %{x} contas<extra></extra>",
+    ))
+    fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"),
+                       xaxis_title=None, showlegend=False, plot_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"chart_{key_prefix}")
 
-    risco = compute_risk_score(contas, consumo, evento, today)
-    a = a.merge(risco, on="IDCONTA", how="left")
 
-    events_map = {idc: v["evl"] for idc, v in ev_stats.items()}
-    monthly_map = {idc: v["monthly"] for idc, v in ev_stats.items()}
+def risco_table(F: pd.DataFrame, key_prefix: str = "risco_table"):
+    r = F[F["peso_risco"].notna()].copy()
+    if r.empty:
+        st.info("Nenhuma conta classificada na seleção.")
+        return
+    cols = ["NOME_CONTA", "nm_modalidade", "peso_risco", "peso_total"]
+    labels = ["Conta", "Modalidade", "Classificação", "Pontuação"]
+    tbl = r[cols].rename(columns=dict(zip(cols, labels))).sort_values("Pontuação")
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=420, key=f"table_{key_prefix}")
 
-    return a, series_map, {"evl": events_map, "monthly": monthly_map}, ref_date, today, missing
+
+def risco_metodologia():
+    """Resumo fixo de como a pontuação é calculada — não muda conforme a conta
+    selecionada, é a régua em si (pra explicar de uma vez, não caso a caso)."""
+    st.markdown("A pontuação de cada conta soma 6 componentes — os limiares de cada um mudam "
+                 "conforme a modalidade de atendimento (Tech/Low/Mid/High Touch, New Logo) — e desconta "
+                 "uma penalidade por status da conta:")
+    componentes = [
+        "Contato com o cliente — interações individuais e em massa nos últimos 100 dias",
+        "% de créditos consumidos — ritmo de consumo do pacote frente ao tempo de contrato",
+        "% de usuários ativados — proporção dos usuários cadastrados que já ativaram",
+        "Maturidade — nível de maturidade registrado no cadastro da conta",
+        "Login recente — dias desde o último acesso",
+        "Quantidade de apps em uso",
+    ]
+    for c in componentes:
+        st.caption(f"+ {c}")
+    st.caption("− Penalidade por status da conta (varia por status e modalidade)")
+
+    st.markdown("**A soma final define a classificação:**")
+    faixas = [("Crítico", "até 20 pontos"), ("Alto", "21 a 40 pontos"),
+              ("Médio", "41 a 60 pontos"), ("Baixo", "acima de 60 pontos")]
+    for label, faixa in faixas:
+        cor = "red" if label in ("Crítico", "Alto") else "orange" if label == "Médio" else "green"
+        st.markdown(f":{cor}[**{label}**] — {faixa}")
+
+
+def risco_view(F: pd.DataFrame):
+    st.caption("Réplica exata da regra que já roda no ArcGIS (Arcade) — mesmos pesos e limiares. "
+               "Quanto maior a pontuação, mais saudável a conta.")
+
+    excluidas = int(F["peso_risco"].isna().sum())
+    if excluidas:
+        st.caption(f"{excluidas} conta(s) fora da régua (dado insuficiente pra calcular a pontuação).")
+
+    risco_kpis(F)
+    st.markdown("---")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.markdown("##### Contas por classificação")
+        chart_risco_dist(F)
+    with c2:
+        st.markdown("##### Como a pontuação é calculada")
+        risco_metodologia()
+
+    st.markdown("##### Todas as contas, ordenadas da menor para a maior pontuação")
+    risco_table(F)
+
+
+# ============================================================================
+# visão executiva — uma tela, foco em risco (pra apresentação)
+# ============================================================================
+RISK_TIERS = [1, 2, 3, 6]  # foco imediato, foco da semana, monitoramento, saúde desconhecida
+
+
+def risk_kpis(F: pd.DataFrame, acc_total: int):
+    sc = F[F["t"] != 7]
+    risk = sc[sc["t"].isin(RISK_TIERS)]
+    ren60 = sc[sc["days_to_end"].notna() & (sc["days_to_end"] <= 60)]
+    sem_contato = sc[sc["eff_90"] == 0]
+    credit_risk = risk.loc[risk["hasUse"], "tot_cred"].sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contas em risco", len(risk), f"de {len(sc)} na seleção")
+    c2.metric("Renovação em até 60 dias", len(ren60))
+    c3.metric("Sem contato efetivo em 90 dias", len(sem_contato))
+    c4.metric("Créditos em risco (pacote)", f"{credit_risk:,.0f}".replace(",", "."))
+
+
+def spotlight_accounts(F: pd.DataFrame, n: int = 3):
+    """As contas mais urgentes, contadas como história: motivo + o que já está sendo feito."""
+    risk = F[F["t"].isin(RISK_TIERS)].copy()
+    if risk.empty:
+        st.info("Nenhuma conta em risco na seleção atual.")
+        return
+    risk["_ord"] = risk["days_to_end"].fillna(9999)
+    risk = risk.sort_values(["t", "_ord"]).head(n)
+
+    cols = st.columns(len(risk))
+    for col, (_, a) in zip(cols, risk.iterrows()):
+        with col:
+            cor = "red" if a["t"] in (1, 2, 6) else "orange"
+            st.markdown(f":{cor}[**{a['NOME_CONTA']}**]  ·  {TIER_LABEL[a['t']]}")
+            st.caption(a["mot"])
+            st.success(f"Próximo passo: {a['ac']}")
+            if pd.notna(a.get("days_to_end")):
+                dte = int(a["days_to_end"])
+                st.caption(f"Contrato vence em {dte} dias" if dte >= 0 else f"Contrato vencido há {-dte} dias")
+
+
+def risk_accounts_table(F: pd.DataFrame, key_prefix: str = "risk"):
+    """Todas as contas em risco, priorizadas — a lista de trabalho por trás dos KPIs."""
+    risk = F[F["t"].isin(RISK_TIERS)].copy()
+    if risk.empty:
+        st.info("Nenhuma conta em risco na seleção atual.")
+        return
+    risk["Prioridade"] = risk["t"].map(TIER_LABEL)
+    risk["Vence em (dias)"] = risk["days_to_end"]
+    cols = ["NOME_CONTA", "Prioridade", "mot", "ac", "Vence em (dias)"]
+    labels = ["Conta", "Prioridade", "Motivo", "Próximo passo", "Vence em (dias)"]
+    tbl = risk[cols].rename(columns=dict(zip(cols, labels))).sort_values("Prioridade")
+    st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(420, 80 + 35 * len(tbl)),
+                 key=f"table_{key_prefix}")
+
+
+def executive_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp):
+    risk_kpis(F, len(acc))
+    st.markdown("---")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.markdown("##### Contas por prioridade")
+        chart_tiers(F, key_prefix="exec_tiers")
+    with c2:
+        st.markdown("##### Contratos vencendo (±90 dias)")
+        chart_renew(F, today, key_prefix="exec_renew")
+
+    st.markdown("---")
+    st.markdown("##### Contas em risco agora — e o que estamos fazendo a respeito")
+    spotlight_accounts(F)
+
+    st.markdown("##### Todas as contas em risco, priorizadas")
+    risk_accounts_table(F, key_prefix="exec_risk")
+
+    with st.expander("Ver painel completo do analista (consumo, adoção, atividade do time)"):
+        st.caption("Detalhe operacional do dia a dia — não recomendado pra apresentação.")
+        analyst_view(F, acc, series, events, today, with_kpis=False, key_prefix="exec_nested")
+
+
+# ============================================================================
+# visão analista — o painel de trabalho completo, granular
+# ============================================================================
+def analyst_view(F: pd.DataFrame, acc: pd.DataFrame, series: dict, events: dict, today: pd.Timestamp,
+                  with_kpis: bool = True, key_prefix: str = "analyst"):
+    if with_kpis:
+        kpis(F, len(acc))
+        st.markdown("---")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.markdown("##### Onde estão as contas")
+        chart_tiers(F, key_prefix=f"{key_prefix}_tiers")
+    with c2:
+        st.markdown("##### Consumo de créditos × prazo do contrato")
+        chart_scatter(F, key_prefix=f"{key_prefix}_scatter")
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("##### Contratos vencendo (±90 dias)")
+        chart_renew(F, today, key_prefix=f"{key_prefix}_renew")
+    with c4:
+        st.markdown("##### Adoção ao longo do tempo")
+        chart_adoption(F, series, key_prefix=f"{key_prefix}_adoption")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        st.markdown("##### O que o CS está fazendo")
+        chart_events(F, events["monthly"], key_prefix=f"{key_prefix}_events")
+    with c6:
+        st.markdown("##### Qualidade do cadastro")
+        quality_panel(F)
+
+    st.markdown("##### Por vertical")
+    vertical_table(F, key_prefix=f"{key_prefix}_vertical")
+
+    st.markdown("##### Contas")
+    accounts_table(F, key_prefix=f"{key_prefix}_accounts")
+
+    st.markdown("---")
+    account_detail(F if len(F) else acc, series, events, key_prefix=f"{key_prefix}_detail")
+
+
+# ============================================================================
+# main
+# ============================================================================
+def main():
+    _init_state()
+    st.title("Painel da carteira ArcGIS")
+    st.caption("Dados ao vivo do Feature Service, filtrados pelo analista CS. Prioridade e motivo são calculados por regras automáticas — não são as análises manuais do relatório.")
+
+    view_mode = st.sidebar.radio(
+        "Visão",
+        ["Classificação de risco (fórmula)", "Executiva (apresentação)", "Analista (completa)"],
+        index=0,
+        help="Classificação de risco: a régua ponderada (mesma do Arcade), auditável conta a conta. "
+             "Executiva: uma tela, focada em risco — pra apresentar. Analista: o painel completo do dia a dia.",
+    )
+    st.sidebar.markdown("---")
+    sidebar()
+
+    if not st.session_state.loaded:
+        st.info("Preencha a conexão na barra lateral e clique em **Carregar carteira**.")
+        return
+
+    acc = st.session_state.acc
+    series = st.session_state.series
+    events = st.session_state.events
+    ref_date = st.session_state.ref_date
+    today = st.session_state.today
+
+    sub = f"{len(acc)} contas cadastradas"
+    if ref_date is not None:
+        sub += f" · consumo AGOL até {ref_date.strftime('%d/%m/%Y')}"
+    sub += f" · posição em {today.strftime('%d/%m/%Y')}"
+    st.caption(sub)
+
+    if st.session_state.get("missing"):
+        missing = st.session_state.missing
+        detail = " · ".join(f"{layer}: {', '.join(cols)}" for layer, cols in missing.items())
+        st.warning(f"Alguns campos esperados não foram encontrados no serviço e foram tratados como vazios (pode afetar prioridade/motivo). {detail}")
+
+    F = filters_ui(acc)
+    st.markdown("---")
+
+    if view_mode.startswith("Classificação"):
+        risco_view(F)
+    elif view_mode.startswith("Executiva"):
+        executive_view(F, acc, series, events, today)
+    else:
+        analyst_view(F, acc, series, events, today)
+
+
+if __name__ == "__main__":
+    main()
