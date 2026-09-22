@@ -151,9 +151,9 @@ def filters_ui(acc: pd.DataFrame):
         parc_sel = st.selectbox("Parceiro", ["Todos"] + parc_vals)
     with c4:
         mod_vals = sorted(acc["MODALIDADE_ATENDIMENTO"].dropna().unique().tolist())
-        mod_sel = st.selectbox(
-            "Modalidade", ["Todas"] + mod_vals,
-            format_func=lambda m: m if m == "Todas" else MODALIDADE_LABEL.get(int(m), str(m)),
+        mod_sel = st.multiselect(
+            "Modalidade", options=mod_vals, default=mod_vals,
+            format_func=lambda m: MODALIDADE_LABEL.get(int(m), str(m)),
         )
     with c5:
         risco_sel = st.multiselect("Classificação de risco", options=RISCO_ORDER, default=RISCO_ORDER)
@@ -164,8 +164,7 @@ def filters_ui(acc: pd.DataFrame):
         f = f[f["VERTICAL"] == vert_sel]
     if parc_sel != "Todos":
         f = f[f["PARCEIRO"].fillna("(sem parceiro)") == parc_sel]
-    if mod_sel != "Todas":
-        f = f[f["MODALIDADE_ATENDIMENTO"] == mod_sel]
+    f = f[f["MODALIDADE_ATENDIMENTO"].isin(mod_sel)]
     # contas fora da régua (ex.: AGOL não licenciado) não têm peso_risco — deixa
     # passar sempre, o filtro só restringe quem TEM classificação
     f = f[f["peso_risco"].isna() | f["peso_risco"].isin(risco_sel)]
