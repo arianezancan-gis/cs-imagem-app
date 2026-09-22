@@ -128,16 +128,53 @@ def query_layer(base_url: str, layer_id: int, token: str | None = None, where: s
     return _query(base_url, layer_id, where, token, out_fields)
 
 
+_FIELD_TYPE_CACHE: dict[tuple, str | None] = {}
+_STRING_FIELD_TYPES = {"esriFieldTypeString", "esriFieldTypeGUID", "esriFieldTypeGlobalID"}
+
+
+def _field_type(base_url: str, layer_id: int, field_name: str, token: str | None = None) -> str | None:
+    """Tipo real do campo, lido do schema da camada (não do que o Python achou que
+    era ao ler outra camada). Evita adivinhar número vs texto — dois campos com o
+    mesmo nome em camadas diferentes podem ter tipos diferentes num serviço."""
+    key = (base_url, layer_id, field_name.lower())
+    if key in _FIELD_TYPE_CACHE:
+        return _FIELD_TYPE_CACHE[key]
+    ftype = None
+    try:
+        params = {"f": "json"}
+        if token:
+            params["token"] = token
+        r = requests.get(f"{base_url.rstrip('/')}/{layer_id}", params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        for f in data.get("fields", []):
+            if str(f.get("name", "")).lower() == field_name.lower():
+                ftype = f.get("type")
+                break
+    except Exception:
+        ftype = None  # não deu pra ler o schema — quem chamou cai pro palpite anterior
+    _FIELD_TYPE_CACHE[key] = ftype
+    return ftype
+
+
 def query_by_ids(base_url: str, layer_id: int, id_field: str, ids, token: str | None = None, chunk_size: int = 200, out_fields: str = "*") -> pd.DataFrame:
     ids = [i for i in ids if i is not None]
     if not ids:
         return pd.DataFrame()
-    is_num = isinstance(ids[0], (int, float, np.integer, np.floating)) and not isinstance(ids[0], bool)
+
+    ftype = _field_type(base_url, layer_id, id_field, token)
+    if ftype is not None:
+        is_num = ftype not in _STRING_FIELD_TYPES
+    else:
+        # não conseguiu ler o schema desta camada — usa o tipo dos IDs como vieram
+        # de CONTAS_0 (comportamento anterior, só como último recurso)
+        is_num = isinstance(ids[0], (int, float, np.integer, np.floating)) and not isinstance(ids[0], bool)
+
     frames = []
     for i in range(0, len(ids), chunk_size):
         chunk = ids[i:i + chunk_size]
         if is_num:
-            vals = ",".join(str(int(v)) for v in chunk)
+            vals = ",".join(str(int(float(v))) for v in chunk)
         else:
             vals = ",".join("'" + str(v).replace("'", "''") + "'" for v in chunk)
         where = f"{id_field} IN ({vals})"
