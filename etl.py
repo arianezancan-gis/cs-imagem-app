@@ -15,11 +15,11 @@ LAYER_IDS = {"contas": 0, "contato": 1, "enduser": 2, "evento": 3, "consumo": 6}
 
 TIER_LABEL = {
     1: "Foco imediato", 2: "Foco da semana", 3: "Monitoramento", 4: "Oportunidade",
-    5: "Estável", 6: "Saúde desconhecida", 7: "Fora do escopo (confirmar)",
+    5: "Estável", 6: "Saúde desconhecida",
 }
 
 # mesma paleta usada nos painéis HTML anteriores (já validada para a família de produtos)
-TIER_COLOR = {1: "#d03b3b", 2: "#ec835a", 3: "#e0a100", 4: "#2a78d6", 5: "#2f9a3b", 6: "#8b93a1", 7: "#c3c9d2"}
+TIER_COLOR = {1: "#d03b3b", 2: "#ec835a", 3: "#e0a100", 4: "#2a78d6", 5: "#2f9a3b", 6: "#8b93a1"}
 EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf7a", "Contato/tentativa": "#eb6834"}
 
 # Classificação de risco por pontuação ponderada — réplica em Python da regra
@@ -587,12 +587,8 @@ def compute_risk_score(contas: pd.DataFrame, consumo: pd.DataFrame, evento: pd.D
 
 
 def tier_of(r: pd.Series) -> int:
-    if r.get("ESTRATEGIA_ATENDIMENTO") == 2:
-        return 7
     if pd.isna(r.get("tot_cred")):
         return 3 if (r.get("eff_90") or 0) > 0 else 6
-    if pd.notna(r.get("co_stale_days")) and r["co_stale_days"] > 14:
-        return 6
     perc, dte, el, lg = r.get("perc"), r.get("days_to_end"), r.get("elapsed"), r.get("login_days")
     if (((pd.notna(perc) and perc >= 90 and pd.notna(dte) and dte > 45)
          or (pd.notna(perc) and perc >= 80 and pd.notna(el) and el < 50))
@@ -610,9 +606,6 @@ def tier_of(r: pd.Series) -> int:
 
 def motivo_of(r: pd.Series):
     t = r["t"]
-    if t == 7:
-        return ("Perfil compatível com conta fora do escopo de atendimento (estratégia de atendimento = 2)",
-                "Confirmar com gestor se a conta sai da carteira")
     if pd.isna(r.get("tot_cred")):
         if t == 6:
             return ("Sem dados de consumo AGOL (só Enterprise) e sem contato efetivo em 90 dias: não há evidência para afirmar saúde",
@@ -620,9 +613,8 @@ def motivo_of(r: pd.Series):
         return (f"Adoção invisível (sem AGOL); relacionamento com {int(r.get('eff_90') or 0)} contato(s) efetivo(s) em 90 dias",
                 "Levantar uso do Enterprise com o cliente na próxima recorrência")
     if t == 6:
-        stale = int(r["co_stale_days"]) if pd.notna(r.get("co_stale_days")) else "?"
-        return (f"Contrato vencido/sem snapshot há {stale} dias; sem contato efetivo em 90d",
-                "Confirmar com executivo se houve renovação ou churn")
+        return ("Sem contato efetivo em 90 dias, estratégia de CS de baixo toque e poucos snapshots de consumo: não há evidência suficiente para afirmar saúde",
+                "Tentar um contato ativo com o cliente")
     if t == 4:
         perc = r.get("perc"); el = r.get("elapsed")
         return (f"Créditos {round(perc) if pd.notna(perc) else '?'}% consumidos com {round(el) if pd.notna(el) else '?'}% do prazo — consumo acima do ritmo do contrato",
