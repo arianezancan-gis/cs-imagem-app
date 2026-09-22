@@ -22,18 +22,27 @@ TIER_LABEL = {
 TIER_COLOR = {1: "#d03b3b", 2: "#ec835a", 3: "#e0a100", 4: "#2a78d6", 5: "#2f9a3b", 6: "#8b93a1", 7: "#c3c9d2"}
 EVENT_COLOR = {"Campanha": "#b8bfca", "Recorrência": "#2a78d6", "Apoio": "#1baf7a", "Contato/tentativa": "#eb6834"}
 
+# Classificação de risco por pontuação ponderada — réplica em Python da regra
+# Arcade que já roda na camada calculada do ArcGIS (mesmos pesos e limiares).
+# É a régua oficial: qualquer conta classificada aqui tem que bater com o que
+# o Arcade calcula na Feature Layer.
+RISCO_ORDER = ["Crítico", "Alto", "Médio", "Baixo"]
+RISCO_COLOR = {"Crítico": "#d03b3b", "Alto": "#ec835a", "Médio": "#e0a100", "Baixo": "#2f9a3b"}
+MODALIDADE_LABEL = {1: "Tech Touch", 2: "Low Touch", 3: "Mid Touch", 4: "High Touch", 5: "New Logo"}
+
 # Campos esperados em cada camada. Serviços diferentes (ex.: a base compartilhada
 # entre analistas) podem ter nomes de campo ligeiramente diferentes — em vez de
 # quebrar com KeyError, o app preenche o que faltar como vazio e avisa na tela
 # quais campos não foram encontrados, pra você conferir o nome exato no serviço.
 CONTAS_COLS = ["IDCONTA", "NOME_CONTA", "VERTICAL", "SUBSETOR", "PARCEIRO", "EXECUTIVO_RECORRENCIA",
                "EXECUTIVO_NEGOCIOS", "ENGAJAMENTO", "MATURIDADE", "STATUS", "ESTRATEGIA_CS",
-               "ESTRATEGIA_ATENDIMENTO", "MODALIDADE_ATENDIMENTO", "ENTERPRISE", "AGOL", "ANALISTA_CS"]
+               "ESTRATEGIA_ATENDIMENTO", "MODALIDADE_ATENDIMENTO", "ENTERPRISE", "AGOL", "ANALISTA_CS",
+               "QTDE_APPS"]
 CONTATO_COLS = ["IDCONTA"]
 ENDUSER_COLS = ["IDCONTA", "ENDUSER", "DEPARTAMENTO"]
 EVENTO_COLS = ["IDCONTA", "RESUMO", "FORMATO", "TIPO", "STATUS", "DATA"]
 CONSUMO_COLS = ["IDCONTA", "ENDUSER", "DATA", "CREDITOS", "TOTAL_CREDITOS", "TOTAL_USER", "TOTAL_ATIVADO",
-                "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"]
+                "LAST_LOGIN", "DATA_INICIO", "DATA_FIM", "PERC_CREDITOS"]
 
 
 def _missing_fields(df: pd.DataFrame, expected: list[str]) -> list[str]:
@@ -383,6 +392,182 @@ def _consumo_stats(consumo: pd.DataFrame, today: pd.Timestamp):
     return pd.DataFrame(rows), series_map, ref_date
 
 
+# ============================================================================
+# classificação de risco por pontuação ponderada
+# (réplica linha-a-linha da regra Arcade que já roda na camada calculada do
+# ArcGIS — mesmos pesos, mesmos limiares, mesma ordem de avaliação. Contas
+# com AGOL=2 ficam de fora, igual ao Arcade original.)
+# ============================================================================
+def _ultimo_consumo(consumo: pd.DataFrame) -> pd.DataFrame:
+    """Uma linha por conta: o snapshot de consumo mais recente (sem agregar por
+    ENDUSER — pega a linha mais nova de qualquer organização, igual à regra Arcade,
+    que não soma orgs como o resto do pipeline faz)."""
+    co = consumo.copy()
+    if co.empty:
+        return pd.DataFrame(columns=["IDCONTA"])
+    for col in ("DATA", "LAST_LOGIN", "DATA_INICIO", "DATA_FIM"):
+        if col in co.columns:
+            co[col] = esri_dt(co[col])
+    co = co.dropna(subset=["DATA"])
+    if co.empty:
+        return pd.DataFrame(columns=["IDCONTA"])
+    co = co.sort_values("DATA")
+    return co.groupby("IDCONTA", as_index=False).last()
+
+
+def _eventos_100d(evento: pd.DataFrame, today: pd.Timestamp) -> pd.DataFrame:
+    """Contagem de eventos por conta e FORMATO (1,2,3,4,6,7,8), só últimos 100 dias."""
+    cols = ["IDCONTA"] + [f"ev{i}" for i in (1, 2, 3, 4, 6, 7, 8)]
+    ev = evento.copy()
+    if ev.empty:
+        return pd.DataFrame(columns=cols)
+    ev["DATA"] = esri_dt(ev.get("DATA"))
+    ev = ev.dropna(subset=["DATA", "IDCONTA", "FORMATO"])
+    ev = ev[ev["DATA"] >= today - pd.Timedelta(days=100)]
+    if ev.empty:
+        return pd.DataFrame(columns=cols)
+    piv = ev.pivot_table(index="IDCONTA", columns="FORMATO", values="DATA", aggfunc="count", fill_value=0)
+    for f in (1, 2, 3, 4, 6, 7, 8):
+        if f not in piv.columns:
+            piv[f] = 0
+    piv = piv[[1, 2, 3, 4, 6, 7, 8]]
+    piv.columns = [f"ev{int(c)}" for c in piv.columns]
+    return piv.reset_index()
+
+
+def _first_true(pairs, default=0):
+    """Réplica do When() do Arcade: primeira condição verdadeira vence; senão, default."""
+    for cond, val in pairs:
+        if cond:
+            return val
+    return default
+
+
+def _peso_consumo(modalidade, perc, dias_ini):
+    if pd.isna(perc) or perc == 0:
+        return 0
+    gt = lambda x: pd.notna(dias_ini) and dias_ini > x
+    lt = lambda x: pd.notna(dias_ini) and dias_ini < x
+    if modalidade == 1:
+        return _first_true([
+            (0 < perc <= 10 and gt(60), 10), (0 < perc <= 10 and lt(60), 12),
+            (10 < perc <= 50 and gt(180), 15), (10 < perc <= 50 and lt(180), 20),
+            (perc > 50, 25),
+        ])
+    return _first_true([
+        (0 < perc <= 10 and gt(60), 7), (0 < perc <= 10 and lt(60), 10),
+        (10 < perc <= 50 and gt(180), 12), (10 < perc <= 50 and lt(180), 17),
+        (perc > 50, 20),
+    ])
+
+
+def _peso_ativacao(modalidade, perc_at):
+    if pd.isna(perc_at) or perc_at == 0:
+        return 0
+    if modalidade == 1:
+        return _first_true([(0 < perc_at < 50, 5), (perc_at == 50, 7), (50 < perc_at <= 80, 10), (perc_at > 80, 15)])
+    return _first_true([(0 < perc_at < 50, 3), (perc_at == 50, 5), (50 < perc_at <= 80, 7), (perc_at > 80, 10)])
+
+
+def _peso_login(modalidade, dias_login):
+    if pd.isna(dias_login):
+        return 0
+    if modalidade == 1:
+        return _first_true([
+            (30 < dias_login <= 60, 10), (15 < dias_login <= 30, 15),
+            (5 < dias_login <= 15, 20), (1 < dias_login <= 5, 25), (dias_login <= 1, 30),
+        ])
+    return _first_true([
+        (30 < dias_login <= 60, 5), (15 < dias_login <= 30, 10),
+        (5 < dias_login <= 15, 12), (1 < dias_login <= 5, 16), (dias_login <= 1, 20),
+    ])
+
+
+def _peso_maturidade(modalidade, mat):
+    if pd.isna(mat) or mat == 4:
+        return 0
+    if modalidade == 1:
+        return _first_true([(mat == 1, 5), (mat == 2, 8), (mat == 3, 10)])
+    return _first_true([(mat == 1, 10), (mat == 2, 15), (mat == 3, 20)])
+
+
+def _peso_contato(modalidade, um_um, um_muitos):
+    base_uu = 0 if pd.isna(um_um) else um_um
+    base_um = 0 if pd.isna(um_muitos) else um_muitos
+    div = {4: 3, 3: 2, 2: 1, 1: 1}.get(modalidade, 1)
+    v_uu, v_um = base_uu / div, base_um / div
+    if modalidade in (3, 4):
+        return _first_true([
+            (v_uu >= 1 and v_um >= 1, 20),
+            (0.5 <= v_uu < 1 and 0.5 <= v_um < 1, 15),
+            (0 < v_uu < 0.5 and 0 < v_um < 1, 10),
+            (v_uu > 0 or v_um > 0, 5),
+            (v_uu == 0 and v_um == 0, 0),
+        ])
+    if modalidade == 2:
+        return _first_true([(base_uu >= 1 and base_um >= 1, 20), (base_uu == 0 and base_um == 0, 0)])
+    if modalidade == 1:
+        return _first_true([(base_um > 1, 20), (base_uu > 0 and base_um > 0, 20), (base_um == 1, 10)])
+    return 0
+
+
+def _penalidade_status(modalidade, status):
+    if modalidade == 1:
+        return _first_true([(status == 3, 5), (status == 5, 35)])
+    return _first_true([(status == 1, 10), (status == 3, 30), (status == 4, 20), (status == 8, 20), (status == 5, 35)])
+
+
+def _classifica_risco(total):
+    if pd.isna(total):
+        return None
+    if total <= 20:
+        return "Crítico"
+    if total <= 40:
+        return "Alto"
+    if total <= 60:
+        return "Médio"
+    return "Baixo"
+
+
+def compute_risk_score(contas: pd.DataFrame, consumo: pd.DataFrame, evento: pd.DataFrame,
+                        today: pd.Timestamp) -> pd.DataFrame:
+    """Réplica da regra Arcade: uma linha por conta (exceto AGOL=2, excluídas igual
+    ao original) com cada peso, o total e a classificação final (peso_risco)."""
+    c = contas[contas.get("AGOL") != 2].copy()
+    if c.empty:
+        return pd.DataFrame(columns=["IDCONTA"])
+
+    ult = _ultimo_consumo(consumo)
+    ev = _eventos_100d(evento, today)
+    a = c.merge(ult, on="IDCONTA", how="left", suffixes=("", "_cons")).merge(ev, on="IDCONTA", how="left")
+    for col in [f"ev{i}" for i in (1, 2, 3, 4, 6, 7, 8)]:
+        a[col] = a[col].fillna(0)
+
+    a["perc_ativado"] = np.where(a["TOTAL_USER"].fillna(0) > 0, 100 * a["TOTAL_ATIVADO"] / a["TOTAL_USER"], 0)
+    a["dias_desde_inicio"] = (today - a["DATA_INICIO"]).dt.days
+    a["dias_login"] = (today - a["LAST_LOGIN"]).dt.days
+    a["um_um"] = a["ev1"] + a["ev2"] + a["ev3"] + a["ev4"] + a["ev6"]
+    a["um_muitos"] = a["ev7"] + a["ev8"]
+
+    a["peso_p_cons"] = a.apply(lambda r: _peso_consumo(r["MODALIDADE_ATENDIMENTO"], r.get("PERC_CREDITOS"), r["dias_desde_inicio"]), axis=1)
+    a["peso_p_ativ"] = a.apply(lambda r: _peso_ativacao(r["MODALIDADE_ATENDIMENTO"], r["perc_ativado"]), axis=1)
+    a["peso_login"] = a.apply(lambda r: _peso_login(r["MODALIDADE_ATENDIMENTO"], r["dias_login"]), axis=1)
+    a["peso_maturidade"] = a.apply(lambda r: _peso_maturidade(r["MODALIDADE_ATENDIMENTO"], r["MATURIDADE"]), axis=1)
+    a["peso_contato"] = a.apply(lambda r: _peso_contato(r["MODALIDADE_ATENDIMENTO"], r["um_um"], r["um_muitos"]), axis=1)
+    a["peso_qtde_apps"] = a["QTDE_APPS"].fillna(0)
+    a["penalidade_status"] = a.apply(lambda r: _penalidade_status(r["MODALIDADE_ATENDIMENTO"], r["STATUS"]), axis=1)
+
+    a["peso_total"] = (a["peso_contato"] + a["peso_p_cons"] + a["peso_p_ativ"] + a["peso_maturidade"]
+                        + a["peso_login"] + a["peso_qtde_apps"] - a["penalidade_status"])
+    a["peso_risco"] = a["peso_total"].map(_classifica_risco)
+    a["nm_modalidade"] = a["MODALIDADE_ATENDIMENTO"].map(MODALIDADE_LABEL)
+
+    keep = ["IDCONTA", "peso_p_cons", "peso_p_ativ", "peso_login", "peso_maturidade", "peso_contato",
+            "peso_qtde_apps", "penalidade_status", "peso_total", "peso_risco", "nm_modalidade",
+            "perc_ativado", "dias_desde_inicio", "dias_login", "um_um", "um_muitos"]
+    return a[keep]
+
+
 def tier_of(r: pd.Series) -> int:
     if r.get("ESTRATEGIA_ATENDIMENTO") == 2:
         return 7
@@ -486,6 +671,9 @@ def build_portfolio(contas: pd.DataFrame, contato: pd.DataFrame, enduser: pd.Dat
     a["ac"] = mot_ac.apply(lambda x: x[1])
     a["tier_label"] = a["t"].map(TIER_LABEL)
     a["tier_color"] = a["t"].map(TIER_COLOR)
+
+    risco = compute_risk_score(contas, consumo, evento, today)
+    a = a.merge(risco, on="IDCONTA", how="left")
 
     events_map = {idc: v["evl"] for idc, v in ev_stats.items()}
     monthly_map = {idc: v["monthly"] for idc, v in ev_stats.items()}
