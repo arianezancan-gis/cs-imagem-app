@@ -151,7 +151,17 @@ def load_portfolio_raw(base_url: str, analista: str, token: str | None = None, p
     if contas.empty:
         return contas, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    ids = contas["IDCONTA"].tolist()
+    if "IDCONTA" not in contas.columns:
+        cols_found = ", ".join(contas.columns) if len(contas.columns) else "(nenhum campo)"
+        raise ArcGISError(
+            f"CONTAS_0 devolveu {len(contas)} registro(s) para \"{analista}\", mas nenhum tem o campo "
+            f"'IDCONTA' — não dá pra continuar sem ele (é a chave usada pra juntar as outras 4 camadas). "
+            f"Campos encontrados nesse retorno: {cols_found}. Confira o nome exato do campo de ID no serviço."
+        )
+
+    ids = [i for i in contas["IDCONTA"].tolist() if i is not None]
+    if not ids:
+        return contas.iloc[0:0], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     note(f"{len(contas)} contas encontradas — carregando CONTATO_1…")
     contato = query_by_ids(base_url, LAYER_IDS["contato"], "IDCONTA", ids, token)
     note("Carregando ENDUSER_2…")
